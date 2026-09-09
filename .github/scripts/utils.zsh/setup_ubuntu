@@ -38,8 +38,11 @@ if (( ! (${skips[(Ie)all]} + ${skips[(Ie)deps]}) )) {
   sudo add-apt-repository --yes ppa:obsproject/obs-studio
   sudo apt update
 
+  # libcurl is the plugin's own dependency: on Windows and macOS it arrives
+  # with obs-deps, on Linux it comes from the system.
   sudo apt-get install ${apt_args} \
     build-essential \
+    libcurl4-openssl-dev \
     libgles2-mesa-dev \
     libsimde-dev \
     obs-studio
