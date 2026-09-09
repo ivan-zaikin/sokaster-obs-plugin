@@ -79,6 +79,7 @@ void save_locked()
 	obs_data_set_int(data, "max_height", g_config.max_height);
 	obs_data_set_int(data, "jpeg_quality", g_config.jpeg_quality);
 	obs_data_set_int(data, "vision_interval_ms", g_config.vision_interval_ms);
+	obs_data_set_int(data, "audio_track", g_config.audio_track);
 
 	/* _safe writes to a temporary and renames: a crash mid-write leaves the
 	 * previous settings intact instead of an empty file. */
@@ -115,6 +116,8 @@ void load()
 	const long long max_height = obs_data_get_int(data, "max_height");
 	const long long quality = obs_data_get_int(data, "jpeg_quality");
 	const long long interval = obs_data_get_int(data, "vision_interval_ms");
+	const bool has_track = obs_data_has_user_value(data, "audio_track");
+	const long long track = obs_data_get_int(data, "audio_track");
 
 	if (max_width >= 160 && max_width <= 3840)
 		loaded.max_width = static_cast<uint32_t>(max_width);
@@ -124,6 +127,8 @@ void load()
 		loaded.jpeg_quality = static_cast<int>(quality);
 	if (interval >= 1000 && interval <= 600000)
 		loaded.vision_interval_ms = static_cast<int>(interval);
+	if (has_track && track >= 0 && track < 6)
+		loaded.audio_track = static_cast<int>(track);
 
 	obs_data_release(data);
 

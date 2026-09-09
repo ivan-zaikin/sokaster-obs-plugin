@@ -12,6 +12,10 @@ include(compilerconfig)
 include(defaults)
 include(helpers)
 
+# Ours, not the template's — kept in its own directory so the two never get
+# confused when the template is updated.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/sokaster/onnxruntime.cmake")
+
 add_library(${CMAKE_PROJECT_NAME} MODULE)
 
 find_package(libobs REQUIRED)
@@ -60,6 +64,21 @@ target_sources(
     src/vision/source-picker.hpp
     src/vision/vision-loop.cpp
     src/vision/vision-loop.hpp
+    src/audio/audio-loop.cpp
+    src/audio/audio-loop.hpp
+    src/audio/audio-tap.cpp
+    src/audio/audio-tap.hpp
+    src/audio/silero-vad.cpp
+    src/audio/silero-vad.hpp
+    src/audio/vad-segmenter.cpp
+    src/audio/vad-segmenter.hpp
+    src/audio/wav-encoder.cpp
+    src/audio/wav-encoder.hpp
 )
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
+
+# Voice activity detection runs a small ONNX model, so the runtime travels with
+# the plugin: neither OBS nor obs-deps carries it. After the plugin properties,
+# because on macOS this copies into the bundle the line above creates.
+target_add_onnxruntime(${CMAKE_PROJECT_NAME})

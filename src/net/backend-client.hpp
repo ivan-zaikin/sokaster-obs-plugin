@@ -31,6 +31,9 @@ struct HttpResult {
 	long status = 0;
 	std::string body;
 
+	/* Seconds from a Retry-After header, 0 when the server did not send one. */
+	int retry_after_seconds = 0;
+
 	bool ok() const { return status >= 200 && status < 300; }
 	bool rate_limited() const { return status == 429; }
 	bool network_error() const { return status == 0; }
@@ -56,6 +59,12 @@ public:
 	void configure(const std::string &base_url, const std::string &access_key);
 
 	HttpResult post_frame(const std::vector<uint8_t> &jpeg);
+
+	/* One VAD segment. duration_ms and captured_at travel alongside the file
+	 * because the backend orders the transcript by when speech happened, not
+	 * by when the upload arrived. */
+	HttpResult post_audio(const std::vector<uint8_t> &wav, int duration_ms, const std::string &captured_at);
+
 	HttpResult get_settings();
 	HttpResult post_session_start();
 	HttpResult post_session_stop();

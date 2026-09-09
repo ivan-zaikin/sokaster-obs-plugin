@@ -24,6 +24,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "plugin-config.hpp"
 #include "net/backend-client.hpp"
 #include "vision/vision-loop.hpp"
+#include "audio/audio-loop.hpp"
+
+#include <QMetaObject>
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
@@ -41,6 +44,16 @@ MODULE_EXPORT const char *obs_module_name(void)
 static bool dock_registered = false;
 static bool frontend_callback_added = false;
 
+/* Owned by OBS, never deleted here. Kept only so the panel can be told to
+ * redraw when something it shows has changed underneath it. */
+static SokasterDock *dock_widget = nullptr;
+
+static void refresh_dock()
+{
+	if (dock_widget)
+		QMetaObject::invokeMethod(dock_widget, "refreshSources", Qt::QueuedConnection);
+}
+
 /*
  * The co-host works while the stream works.
  *
@@ -55,14 +68,23 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
 		/* Scenes and sources are not safe to touch before this. */
 		sokaster::VisionLoop::instance().restore_selection();
+		sokaster::AudioLoop::instance().resolve_track();
+		refresh_dock();
+		break;
+
+	case OBS_FRONTEND_EVENT_SCENE_CHANGED:
+		/* A new scene can bring audio sources of its own along with it. */
+		refresh_dock();
 		break;
 
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
 		sokaster::VisionLoop::instance().start();
+		sokaster::AudioLoop::instance().start();
 		break;
 
 	case OBS_FRONTEND_EVENT_STREAMING_STOPPED:
 		sokaster::VisionLoop::instance().stop();
+		sokaster::AudioLoop::instance().stop();
 		break;
 
 	case OBS_FRONTEND_EVENT_EXIT:
@@ -70,6 +92,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 		 * alive. A thread that outlives this is a crash on the way out —
 		 * the most visible kind of failure there is. */
 		sokaster::VisionLoop::instance().stop();
+		sokaster::AudioLoop::instance().stop();
 		sokaster::VisionLoop::instance().grabber().select(nullptr);
 		sokaster::VisionLoop::instance().grabber().shutdown();
 		break;
@@ -120,6 +143,8 @@ void obs_module_post_load(void)
 			return;
 		}
 
+		dock_widget = dock;
+
 		obs_log(LOG_INFO, "dock registered");
 
 		obs_frontend_add_event_callback(on_frontend_event, nullptr);
@@ -136,6 +161,7 @@ void obs_module_unload(void)
 	/* Normally already done by OBS_FRONTEND_EVENT_EXIT; repeated here because
 	 * a module can also be unloaded without the frontend ever running. */
 	sokaster::VisionLoop::instance().stop();
+	sokaster::AudioLoop::instance().stop();
 
 	if (frontend_callback_added) {
 		obs_frontend_remove_event_callback(on_frontend_event, nullptr);
@@ -145,6 +171,7 @@ void obs_module_unload(void)
 	if (dock_registered) {
 		obs_frontend_remove_dock(SokasterDock::kDockId);
 		dock_registered = false;
+		dock_widget = nullptr;
 	}
 
 	sokaster::BackendClient::global_cleanup();

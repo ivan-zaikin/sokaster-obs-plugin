@@ -18,15 +18,20 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #pragma once
 
+#include <obs.h>
+
 #include <QWidget>
 
 class QLabel;
+class QListWidget;
+class QListWidgetItem;
 
 /*
  * The sokaster control panel — a dock inside the OBS window.
  *
- * A placeholder for now: it verifies that the dock registers, appears in the
- * interface and survives a restart. Contents follow.
+ * Today it carries what the co-host needs before it can hear anything: the
+ * list of audio sources the streamer allows it to listen to, and the track
+ * OBS mixes them onto. The rest of the panel follows.
  *
  * The widget is handed to obs_frontend_add_dock_by_id, which wraps it in a
  * QDockWidget and takes ownership — we must not delete it ourselves.
@@ -36,11 +41,34 @@ class SokasterDock : public QWidget {
 
 public:
 	explicit SokasterDock(QWidget *parent = nullptr);
+	~SokasterDock() override;
 
 	/* Dock id: OBS remembers the panel's position under this key, so it must
 	 * never change — otherwise the streamer loses their layout. */
 	static constexpr const char *kDockId = "sokaster_dock";
 
+public slots:
+	/* Rebuilds the source list. UI thread only; the OBS signals that trigger
+	 * it arrive on other threads and are queued here. */
+	void refreshSources();
+
+private slots:
+	void onSourceToggled(QListWidgetItem *item);
+
 private:
+	void connectSourceSignals();
+	void disconnectSourceSignals();
+
+	/* Global OBS signals. Queue a refresh and return: these fire on whatever
+	 * thread created or destroyed the source. */
+	static void onSourceChangedSignal(void *data, calldata_t *cd);
+
 	QLabel *status_ = nullptr;
+	QLabel *trackLabel_ = nullptr;
+	QListWidget *sources_ = nullptr;
+
+	/* Set while refreshSources() populates, so the check-state changes it
+	 * makes are not mistaken for the streamer clicking. */
+	bool populating_ = false;
+	bool signalsConnected_ = false;
 };

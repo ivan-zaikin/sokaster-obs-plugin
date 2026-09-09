@@ -42,6 +42,11 @@ struct Config {
 	uint32_t max_height = 720;
 	int jpeg_quality = 80;
 
+	/* The OBS track the co-host listens to, 0-based; -1 until one is picked.
+	 * Remembered because it is only free the first time we look: after the
+	 * streamer ticks a source, the track counts as taken. */
+	int audio_track = -1;
+
 	/* Fallback tempo. The backend owns the real one and hands it back as
 	 * EffectiveVisionIntervalMs; this is what we use until it answers. */
 	int vision_interval_ms = 5000;
