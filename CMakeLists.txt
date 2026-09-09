@@ -35,6 +35,31 @@ if(ENABLE_QT)
   )
 endif()
 
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.cpp src/dock/sokaster-dock.cpp src/dock/sokaster-dock.hpp)
+# libcurl comes from obs-deps and ships with OBS itself, so nothing extra
+# travels with the plugin.
+find_package(CURL REQUIRED)
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE CURL::libcurl)
+
+target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE src)
+
+target_sources(
+  ${CMAKE_PROJECT_NAME}
+  PRIVATE
+    src/plugin-main.cpp
+    src/plugin-config.cpp
+    src/plugin-config.hpp
+    src/dock/sokaster-dock.cpp
+    src/dock/sokaster-dock.hpp
+    src/net/backend-client.cpp
+    src/net/backend-client.hpp
+    src/vision/frame-grabber.cpp
+    src/vision/frame-grabber.hpp
+    src/vision/jpeg-encoder.cpp
+    src/vision/jpeg-encoder.hpp
+    src/vision/source-picker.cpp
+    src/vision/source-picker.hpp
+    src/vision/vision-loop.cpp
+    src/vision/vision-loop.hpp
+)
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})

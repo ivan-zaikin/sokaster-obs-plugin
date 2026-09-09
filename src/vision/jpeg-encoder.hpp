@@ -16,24 +16,23 @@ You should have received a copy of the GNU General Public License along
 with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
-#include <plugin-support.h>
+#pragma once
 
-const char *PLUGIN_NAME = "@CMAKE_PROJECT_NAME@";
-const char *PLUGIN_VERSION = "@CMAKE_PROJECT_VERSION@";
+#include "frame-grabber.hpp"
 
-void obs_log(int log_level, const char *format, ...)
-{
-	size_t length = 4 + strlen(PLUGIN_NAME) + strlen(format);
+#include <cstdint>
+#include <vector>
 
-	char *template = malloc(length + 1);
+namespace sokaster {
 
-	snprintf(template, length, "[%s] %s", PLUGIN_NAME, format);
+/*
+ * BGRA to JPEG, using Qt's own encoder.
+ *
+ * obs-deps carries no libjpeg-turbo, and Qt is already linked for the dock, so
+ * this costs nothing to ship and adds no vendored third-party source to review.
+ * Never called from the graphics thread: the caller owns a plain copy of the
+ * pixels by then, and encoding is pure CPU work.
+ */
+bool encode_jpeg(const Frame &frame, int quality, std::vector<uint8_t> &out);
 
-	va_list(args);
-
-	va_start(args, format);
-	blogva(log_level, template, args);
-	va_end(args);
-
-	free(template);
-}
+} // namespace sokaster

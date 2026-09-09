@@ -16,24 +16,22 @@ You should have received a copy of the GNU General Public License along
 with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
-#include <plugin-support.h>
+#pragma once
 
-const char *PLUGIN_NAME = "@CMAKE_PROJECT_NAME@";
-const char *PLUGIN_VERSION = "@CMAKE_PROJECT_VERSION@";
+#include <obs.h>
 
-void obs_log(int log_level, const char *format, ...)
-{
-	size_t length = 4 + strlen(PLUGIN_NAME) + strlen(format);
+namespace sokaster {
 
-	char *template = malloc(length + 1);
+/*
+ * Picks the source the co-host most likely should be watching: the largest
+ * game, window or display capture in the current scene.
+ *
+ * A guess, not a decision — the streamer confirms or changes it in the dock
+ * (step 5 of the reference scenario). Returns a strong reference the caller
+ * releases, or nullptr when the scene holds nothing worth watching.
+ *
+ * Uses the frontend API, so call it from the UI thread.
+ */
+obs_source_t *pick_default_source();
 
-	snprintf(template, length, "[%s] %s", PLUGIN_NAME, format);
-
-	va_list(args);
-
-	va_start(args, format);
-	blogva(log_level, template, args);
-	va_end(args);
-
-	free(template);
-}
+} // namespace sokaster
