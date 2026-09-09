@@ -90,16 +90,12 @@ function(target_add_onnxruntime target)
     set_property(TARGET ${target} APPEND PROPERTY BUILD_RPATH "@loader_path/../Frameworks")
     set_property(TARGET ${target} APPEND PROPERTY INSTALL_RPATH "@loader_path/../Frameworks")
 
-    add_custom_command(
-      TARGET ${target}
-      POST_BUILD
-      COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_BUNDLE_CONTENT_DIR:${target}>/Frameworks"
-      COMMAND
-        "${CMAKE_COMMAND}" -E copy_if_different "${ONNXRUNTIME_RUNTIME_LIBRARY}"
-        "$<TARGET_BUNDLE_CONTENT_DIR:${target}>/Frameworks"
-      COMMENT "Copy ONNX Runtime into ${target}.plugin"
-      VERBATIM
-    )
+    # As a bundle member rather than a post-build copy: the template puts the
+    # plugin's data files in the bundle the same way, and it lands before the
+    # bundle is signed and before the template copies the bundle to rundir.
+    target_sources(${target} PRIVATE "${ONNXRUNTIME_RUNTIME_LIBRARY}")
+    set_property(SOURCE "${ONNXRUNTIME_RUNTIME_LIBRARY}" PROPERTY MACOSX_PACKAGE_LOCATION Frameworks)
+    source_group("Frameworks" FILES "${ONNXRUNTIME_RUNTIME_LIBRARY}")
   else()
     # Beside the plugin in lib/obs-plugins. $ORIGIN keeps the lookup relative to
     # wherever the distribution puts that directory.

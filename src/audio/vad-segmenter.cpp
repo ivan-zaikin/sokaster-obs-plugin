@@ -47,9 +47,15 @@ std::string iso8601_utc(int offset_ms)
 	gmtime_r(&secs, &utc);
 #endif
 
+	/* The calendar part goes through strftime rather than one snprintf of
+	 * seven ints: -Werror=format-truncation reasons about the whole int range
+	 * and does not know gmtime already bounded these fields. */
+	char stamp[24];
+	if (std::strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%S", &utc) == 0)
+		return {};
+
 	char buffer[40];
-	std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", utc.tm_year + 1900, utc.tm_mon + 1,
-		      utc.tm_mday, utc.tm_hour, utc.tm_min, utc.tm_sec, static_cast<int>(millis));
+	std::snprintf(buffer, sizeof(buffer), "%s.%03dZ", stamp, static_cast<int>(millis));
 	return buffer;
 }
 
