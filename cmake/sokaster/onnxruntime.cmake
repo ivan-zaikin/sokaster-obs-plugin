@@ -95,6 +95,10 @@ function(target_add_onnxruntime target)
     # bundle is signed and before the template copies the bundle to rundir.
     target_sources(${target} PRIVATE "${ONNXRUNTIME_RUNTIME_LIBRARY}")
     set_property(SOURCE "${ONNXRUNTIME_RUNTIME_LIBRARY}" PROPERTY MACOSX_PACKAGE_LOCATION Frameworks)
+    # Code Sign On Copy, or signing the bundle stops on the library it now
+    # contains: "code object is not signed at all, in subcomponent
+    # libonnxruntime.dylib". Nested code has to be signed before the bundle is.
+    set_property(SOURCE "${ONNXRUNTIME_RUNTIME_LIBRARY}" PROPERTY XCODE_FILE_ATTRIBUTES "CodeSignOnCopy")
     source_group("Frameworks" FILES "${ONNXRUNTIME_RUNTIME_LIBRARY}")
   else()
     # Beside the plugin in lib/obs-plugins. $ORIGIN keeps the lookup relative to
