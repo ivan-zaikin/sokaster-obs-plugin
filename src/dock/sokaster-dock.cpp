@@ -1,6 +1,6 @@
 /*
 sokaster — an AI co-host inside OBS Studio
-Copyright (C) 2026 sokaster <hello@sokaster.ru>
+Copyright (C) 2026 sokaster <tnixton@gmail.com>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
