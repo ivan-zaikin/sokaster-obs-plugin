@@ -23,10 +23,14 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <curl/curl.h>
 
+#include <cctype>
+#include <stdexcept>
+
 namespace sokaster {
 namespace {
 
 constexpr long kFrameTimeoutSeconds = 30;
+constexpr long kAudioTimeoutSeconds = 30;
 constexpr long kSettingsTimeoutSeconds = 10;
 
 /* Sent while OBS is closing, so it gets a short leash: a backend that is not
@@ -44,6 +48,41 @@ size_t write_body(char *ptr, size_t size, size_t nmemb, void *userdata)
 		return 0;
 
 	body->append(ptr, total);
+	return total;
+}
+
+/* Only Retry-After is read back; the rest of the headers are of no interest,
+ * and parsing more of them would only be more to get wrong. */
+size_t read_header(char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+	const size_t total = size * nmemb;
+	auto *result = static_cast<HttpResult *>(userdata);
+
+	static const char kRetryAfter[] = "retry-after:";
+	const size_t name_len = sizeof(kRetryAfter) - 1;
+
+	if (total > name_len) {
+		bool match = true;
+		for (size_t i = 0; i < name_len; ++i) {
+			if (std::tolower(static_cast<unsigned char>(ptr[i])) != kRetryAfter[i]) {
+				match = false;
+				break;
+			}
+		}
+
+		if (match) {
+			const std::string value(ptr + name_len, total - name_len);
+			try {
+				const int seconds = std::stoi(value);
+				if (seconds > 0)
+					result->retry_after_seconds = seconds;
+			} catch (const std::exception &) {
+				/* A date-form Retry-After, or nonsense. Either way the
+				 * caller's own backoff is the fallback. */
+			}
+		}
+	}
+
 	return total;
 }
 
@@ -123,6 +162,8 @@ HttpResult BackendClient::perform_locked(const std::string &path, bool post, voi
 	curl_easy_setopt(curl, CURLOPT_USERAGENT, user_agent.c_str());
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_body);
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &result.body);
+	curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, read_header);
+	curl_easy_setopt(curl, CURLOPT_HEADERDATA, &result);
 
 	/* Lets stop() interrupt an upload instead of waiting out the timeout. */
 	curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
@@ -174,6 +215,43 @@ HttpResult BackendClient::post_frame(const std::vector<uint8_t> &jpeg)
 	curl_mime_data(part, reinterpret_cast<const char *>(jpeg.data()), jpeg.size());
 
 	HttpResult result = perform_locked("/api/frame", true, mime, kFrameTimeoutSeconds);
+
+	curl_mime_free(mime);
+	return result;
+}
+
+HttpResult BackendClient::post_audio(const std::vector<uint8_t> &wav, int duration_ms, const std::string &captured_at)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+
+	if (!curl_)
+		return {};
+
+	const std::string duration = std::to_string(duration_ms);
+
+	curl_mime *mime = curl_mime_init(static_cast<CURL *>(curl_));
+
+	curl_mimepart *part = curl_mime_addpart(mime);
+	curl_mime_name(part, "audio");
+	curl_mime_filename(part, "segment.wav");
+	curl_mime_type(part, "audio/wav");
+	curl_mime_data(part, reinterpret_cast<const char *>(wav.data()), wav.size());
+
+	part = curl_mime_addpart(mime);
+	curl_mime_name(part, "durationMs");
+	curl_mime_data(part, duration.c_str(), CURL_ZERO_TERMINATED);
+
+	part = curl_mime_addpart(mime);
+	curl_mime_name(part, "capturedAt");
+	curl_mime_data(part, captured_at.c_str(), CURL_ZERO_TERMINATED);
+
+	/* One track carrying everything the streamer ticked, so the backend is
+	 * told "mixed" rather than a device name it could not use anyway. */
+	part = curl_mime_addpart(mime);
+	curl_mime_name(part, "source");
+	curl_mime_data(part, "mixed", CURL_ZERO_TERMINATED);
+
+	HttpResult result = perform_locked("/api/audio", true, mime, kAudioTimeoutSeconds);
 
 	curl_mime_free(mime);
 	return result;
