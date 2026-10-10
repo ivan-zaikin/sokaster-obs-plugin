@@ -22,11 +22,36 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "net/backend-client.hpp"
 
 #include <atomic>
+#include <cstdint>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
 
 namespace sokaster {
+
+/* What the eyes are doing, for the dock. The worker writes it every tick; the
+ * UI reads a copy. */
+struct VisionHealth {
+	enum class State {
+		/* Not running: OBS is not streaming, or nothing is configured. */
+		Idle,
+		/* The last frame reached the server. */
+		Sending,
+		/* The source is alive but has no picture (minimised game). */
+		Empty,
+		/* The selection was deleted or never made. */
+		NoSource,
+		/* Network or 5xx; retry_seconds says when the next attempt is. */
+		Retrying,
+		/* The server asked for fewer frames. */
+		RateLimited,
+		/* 401/403: the key will not start working on its own. */
+		KeyRejected,
+	};
+
+	State state = State::Idle;
+	int retry_seconds = 0;
+};
 
 /*
  * The eyes: one worker thread that ticks, captures the chosen source, encodes a
@@ -46,6 +71,8 @@ public:
 	void stop();
 
 	bool running() const { return running_; }
+
+	VisionHealth health() const;
 
 	/* Restores the source from the saved UUID, or guesses one when there is
 	 * nothing saved. Frontend API inside, so call from the UI thread. */
@@ -71,6 +98,8 @@ private:
 	/* Pulls the tempo the backend dictates. Failure keeps the current one. */
 	void sync_tempo();
 
+	void set_health(VisionHealth::State state, int retry_ms = 0);
+
 	FrameGrabber grabber_;
 	BackendClient client_;
 
@@ -83,6 +112,10 @@ private:
 
 	/* Owned by the worker; the backend may move it at any tick. */
 	int interval_ms_ = 5000;
+
+	mutable std::mutex health_mutex_;
+	VisionHealth health_;
+	uint64_t retry_until_ns_ = 0;
 };
 
 } // namespace sokaster

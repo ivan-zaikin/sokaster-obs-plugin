@@ -21,6 +21,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <plugin-support.h>
 
 #include "dock/sokaster-dock.hpp"
+#include "dock/status-loop.hpp"
 #include "plugin-config.hpp"
 #include "net/backend-client.hpp"
 #include "vision/vision-loop.hpp"
@@ -80,17 +81,22 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
 		sokaster::VisionLoop::instance().start();
 		sokaster::AudioLoop::instance().start();
+		sokaster::StatusLoop::instance().set_streaming(true);
+		refresh_dock();
 		break;
 
 	case OBS_FRONTEND_EVENT_STREAMING_STOPPED:
 		sokaster::VisionLoop::instance().stop();
 		sokaster::AudioLoop::instance().stop();
+		sokaster::StatusLoop::instance().set_streaming(false);
+		refresh_dock();
 		break;
 
 	case OBS_FRONTEND_EVENT_EXIT:
 		/* Last moment at which the graphics thread and Qt are both still
 		 * alive. A thread that outlives this is a crash on the way out —
 		 * the most visible kind of failure there is. */
+		sokaster::StatusLoop::instance().stop();
 		sokaster::VisionLoop::instance().stop();
 		sokaster::AudioLoop::instance().stop();
 		sokaster::VisionLoop::instance().grabber().select(nullptr);
@@ -160,6 +166,7 @@ void obs_module_unload(void)
 {
 	/* Normally already done by OBS_FRONTEND_EVENT_EXIT; repeated here because
 	 * a module can also be unloaded without the frontend ever running. */
+	sokaster::StatusLoop::instance().stop();
 	sokaster::VisionLoop::instance().stop();
 	sokaster::AudioLoop::instance().stop();
 

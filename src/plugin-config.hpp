@@ -23,6 +23,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 namespace sokaster {
 
+/* The public domain, and the only address that may appear in this repository:
+ * used when the streamer pastes a key without ever having set a server. */
+constexpr const char *kDefaultBackendUrl = "https://sokaster.ru";
+
 /*
  * Plugin settings, stored next to the module in obs_module_config_path().
  *

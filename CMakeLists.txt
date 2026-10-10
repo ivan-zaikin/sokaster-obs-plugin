@@ -52,8 +52,14 @@ target_sources(
     src/plugin-main.cpp
     src/plugin-config.cpp
     src/plugin-config.hpp
+    src/dock/overlay-finder.cpp
+    src/dock/overlay-finder.hpp
+    src/dock/readiness.cpp
+    src/dock/readiness.hpp
     src/dock/sokaster-dock.cpp
     src/dock/sokaster-dock.hpp
+    src/dock/status-loop.cpp
+    src/dock/status-loop.hpp
     src/net/backend-client.cpp
     src/net/backend-client.hpp
     src/vision/frame-grabber.cpp

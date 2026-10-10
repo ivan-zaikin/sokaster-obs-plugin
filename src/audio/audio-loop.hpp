@@ -30,6 +30,26 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 namespace sokaster {
 
+/* What the ears are doing, for the dock. Stays put after the workers give up,
+ * so the panel can say why the co-host stopped listening. */
+struct AudioHealth {
+	enum class State {
+		/* Not running: OBS is not streaming, or nothing is configured. */
+		Idle,
+		Listening,
+		/* 403: speech is off for this account. A setting, not a fault. */
+		SpeechDisabled,
+		/* silero_vad.onnx did not load; nothing can be heard. */
+		VadFailed,
+		/* 429 or a failed upload; retry_seconds counts down to the next. */
+		Retrying,
+		KeyRejected,
+	};
+
+	State state = State::Idle;
+	int retry_seconds = 0;
+};
+
 /*
  * The ears: a track OBS mixes for us, a worker that turns it into utterances,
  * and a second worker that posts them.
@@ -57,6 +77,8 @@ public:
 	 * panel should say so rather than imply it is listening. */
 	bool hearing_anything() const;
 
+	AudioHealth health() const;
+
 private:
 	AudioLoop() = default;
 	~AudioLoop() = default;
@@ -68,6 +90,8 @@ private:
 	void run_sender();
 
 	void enqueue(AudioSegment &&segment);
+
+	void set_health(AudioHealth::State state, int retry_seconds = 0);
 
 	AudioTap tap_;
 	BackendClient client_;
@@ -90,6 +114,10 @@ private:
 	std::mutex queue_mutex_;
 	std::condition_variable queue_cv_;
 	std::deque<AudioSegment> queue_;
+
+	mutable std::mutex health_mutex_;
+	AudioHealth::State health_ = AudioHealth::State::Idle;
+	uint64_t retry_until_ns_ = 0;
 };
 
 } // namespace sokaster

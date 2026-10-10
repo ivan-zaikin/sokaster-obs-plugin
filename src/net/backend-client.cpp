@@ -33,6 +33,10 @@ constexpr long kFrameTimeoutSeconds = 30;
 constexpr long kAudioTimeoutSeconds = 30;
 constexpr long kSettingsTimeoutSeconds = 10;
 
+/* An order goes through the safety cascade before the answer comes back,
+ * and the judge alone can take several seconds. */
+constexpr long kDockTimeoutSeconds = 20;
+
 /* Sent while OBS is closing, so it gets a short leash: a backend that is not
  * answering must not hold up the streamer's shutdown. */
 constexpr long kSessionStopTimeoutSeconds = 3;
@@ -140,7 +144,8 @@ std::string BackendClient::url_for(const std::string &path) const
 	return base_url_ + path;
 }
 
-HttpResult BackendClient::perform_locked(const std::string &path, bool post, void *mime, long timeout_seconds)
+HttpResult BackendClient::perform_locked(const std::string &path, Method method, void *mime, const std::string *json,
+					 long timeout_seconds)
 {
 	HttpResult result;
 
@@ -181,13 +186,22 @@ HttpResult BackendClient::perform_locked(const std::string &path, bool post, voi
 	}
 	/* curl would otherwise wait 1s for a 100-continue on every upload. */
 	headers = curl_slist_append(headers, "Expect:");
+	if (json && !mime)
+		headers = curl_slist_append(headers, "Content-Type: application/json; charset=utf-8");
 	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
-	if (mime)
+	if (method == Method::Delete) {
+		curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
+	} else if (mime) {
 		curl_easy_setopt(curl, CURLOPT_MIMEPOST, static_cast<curl_mime *>(mime));
-	else if (post) {
+	} else if (method == Method::Post) {
 		curl_easy_setopt(curl, CURLOPT_POST, 1L);
-		curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, 0L);
+		if (json) {
+			curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json->c_str());
+			curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(json->size()));
+		} else {
+			curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, 0L);
+		}
 	}
 
 	const CURLcode code = curl_easy_perform(curl);
@@ -214,7 +228,7 @@ HttpResult BackendClient::post_frame(const std::vector<uint8_t> &jpeg)
 	curl_mime_type(part, "image/jpeg");
 	curl_mime_data(part, reinterpret_cast<const char *>(jpeg.data()), jpeg.size());
 
-	HttpResult result = perform_locked("/api/frame", true, mime, kFrameTimeoutSeconds);
+	HttpResult result = perform_locked("/api/frame", Method::Post, mime, nullptr, kFrameTimeoutSeconds);
 
 	curl_mime_free(mime);
 	return result;
@@ -251,7 +265,7 @@ HttpResult BackendClient::post_audio(const std::vector<uint8_t> &wav, int durati
 	curl_mime_name(part, "source");
 	curl_mime_data(part, "mixed", CURL_ZERO_TERMINATED);
 
-	HttpResult result = perform_locked("/api/audio", true, mime, kAudioTimeoutSeconds);
+	HttpResult result = perform_locked("/api/audio", Method::Post, mime, nullptr, kAudioTimeoutSeconds);
 
 	curl_mime_free(mime);
 	return result;
@@ -260,19 +274,37 @@ HttpResult BackendClient::post_audio(const std::vector<uint8_t> &wav, int durati
 HttpResult BackendClient::get_settings()
 {
 	std::lock_guard<std::mutex> lock(mutex_);
-	return perform_locked("/api/user/me/settings", false, nullptr, kSettingsTimeoutSeconds);
+	return perform_locked("/api/user/me/settings", Method::Get, nullptr, nullptr, kSettingsTimeoutSeconds);
 }
 
 HttpResult BackendClient::post_session_start()
 {
 	std::lock_guard<std::mutex> lock(mutex_);
-	return perform_locked("/api/session/start", true, nullptr, kSettingsTimeoutSeconds);
+	return perform_locked("/api/session/start", Method::Post, nullptr, nullptr, kSettingsTimeoutSeconds);
 }
 
 HttpResult BackendClient::post_session_stop()
 {
 	std::lock_guard<std::mutex> lock(mutex_);
-	return perform_locked("/api/session/stop", true, nullptr, kSessionStopTimeoutSeconds);
+	return perform_locked("/api/session/stop", Method::Post, nullptr, nullptr, kSessionStopTimeoutSeconds);
+}
+
+HttpResult BackendClient::get(const std::string &path)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	return perform_locked(path, Method::Get, nullptr, nullptr, kDockTimeoutSeconds);
+}
+
+HttpResult BackendClient::post_json(const std::string &path, const std::string &json)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	return perform_locked(path, Method::Post, nullptr, &json, kDockTimeoutSeconds);
+}
+
+HttpResult BackendClient::del(const std::string &path)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	return perform_locked(path, Method::Delete, nullptr, nullptr, kDockTimeoutSeconds);
 }
 
 } // namespace sokaster

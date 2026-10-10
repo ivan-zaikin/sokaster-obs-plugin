@@ -83,6 +83,31 @@ bool AudioLoop::hearing_anything() const
 	return track_ >= 0 && tracks::any_source_heard(static_cast<size_t>(track_));
 }
 
+AudioHealth AudioLoop::health() const
+{
+	std::lock_guard<std::mutex> lock(health_mutex_);
+	AudioHealth result;
+	result.state = health_;
+
+	const uint64_t now = os_gettime_ns();
+	result.retry_seconds =
+		retry_until_ns_ > now ? static_cast<int>((retry_until_ns_ - now + 999999999ull) / 1000000000ull) : 0;
+
+	/* A retry whose wait is over is back to listening as far as anyone can
+	 * tell; the next failure will say otherwise. */
+	if (result.state == AudioHealth::State::Retrying && result.retry_seconds == 0)
+		result.state = AudioHealth::State::Listening;
+	return result;
+}
+
+void AudioLoop::set_health(AudioHealth::State state, int retry_seconds)
+{
+	std::lock_guard<std::mutex> lock(health_mutex_);
+	health_ = state;
+	retry_until_ns_ = retry_seconds > 0 ? os_gettime_ns() + static_cast<uint64_t>(retry_seconds) * 1000000000ull
+					    : 0;
+}
+
 void AudioLoop::start()
 {
 	if (running_)
@@ -112,6 +137,7 @@ void AudioLoop::start()
 
 	stop_requested_ = false;
 	running_ = true;
+	set_health(AudioHealth::State::Listening);
 
 	vad_worker_ = std::thread([this] { run_vad(); });
 	send_worker_ = std::thread([this] { run_sender(); });
@@ -143,6 +169,7 @@ void AudioLoop::stop()
 	}
 
 	running_ = false;
+	set_health(AudioHealth::State::Idle);
 	obs_log(LOG_INFO, "audio: stopped");
 }
 
@@ -167,6 +194,7 @@ void AudioLoop::run_vad()
 	SileroVad vad;
 	if (!vad.load(silero_model_path())) {
 		obs_log(LOG_ERROR, "audio: without the VAD model the co-host cannot hear, stopping");
+		set_health(AudioHealth::State::VadFailed);
 		/* Wake the sender so it does not sit waiting for segments that will
 		 * never come; stop() still joins both. */
 		stop_requested_ = true;
@@ -232,6 +260,7 @@ void AudioLoop::run_sender()
 
 		if (result.ok()) {
 			++sent;
+			set_health(AudioHealth::State::Listening);
 			obs_log(LOG_DEBUG, "audio: segment #%llu sent, %d ms", static_cast<unsigned long long>(sent),
 				segment.duration_ms);
 			continue;
@@ -241,6 +270,7 @@ void AudioLoop::run_sender()
 			/* The account has speech turned off. Not a failure to retry:
 			 * it is a setting, and it will not change mid-stream. */
 			obs_log(LOG_INFO, "audio: speech is disabled for this account, the co-host stops listening");
+			set_health(AudioHealth::State::SpeechDisabled);
 			stop_requested_ = true;
 			vad_cv_.notify_all();
 			break;
@@ -248,6 +278,7 @@ void AudioLoop::run_sender()
 
 		if (result.status == 401) {
 			obs_log(LOG_WARNING, "audio: server rejected the access key, stopping");
+			set_health(AudioHealth::State::KeyRejected);
 			stop_requested_ = true;
 			vad_cv_.notify_all();
 			break;
@@ -258,12 +289,16 @@ void AudioLoop::run_sender()
 									   : kDefaultRateLimitSeconds;
 			backoff_until_ns = os_gettime_ns() + static_cast<uint64_t>(seconds) * 1000000000ull;
 			obs_log(LOG_WARNING, "audio: rate limited, pausing %d s", seconds);
+			set_health(AudioHealth::State::Retrying, seconds);
 			continue;
 		}
 
 		/* Anything else: speech is perishable, so it is dropped rather than
 		 * retried. The next sentence is along in a moment. */
 		obs_log(LOG_WARNING, "audio: send failed (%ld), segment dropped", result.status);
+		/* Nothing is retried, so the "retry" is the next sentence; a few
+		 * seconds is what the panel can honestly promise. */
+		set_health(AudioHealth::State::Retrying, kDefaultRateLimitSeconds);
 	}
 
 	obs_log(LOG_INFO, "audio: sender exit after %llu segments", static_cast<unsigned long long>(sent));

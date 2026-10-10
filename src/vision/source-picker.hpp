@@ -20,7 +20,19 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <obs.h>
 
+#include <string>
+#include <vector>
+
 namespace sokaster {
+
+struct CaptureSourceInfo {
+	std::string uuid;
+	std::string name;
+};
+
+/* Every game, window and display capture in the current scene, in scene
+ * order — what the "Watches" list offers. Frontend API, UI thread only. */
+std::vector<CaptureSourceInfo> list_capture_sources();
 
 /*
  * Picks the source the co-host most likely should be watching: the largest

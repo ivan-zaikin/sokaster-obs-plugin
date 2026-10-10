@@ -69,6 +69,12 @@ public:
 	HttpResult post_session_start();
 	HttpResult post_session_stop();
 
+	/* The dock's side of the API: status, queue, orders. Small JSON both
+	 * ways; parsing is left to the caller, which knows what it asked for. */
+	HttpResult get(const std::string &path);
+	HttpResult post_json(const std::string &path, const std::string &json);
+	HttpResult del(const std::string &path);
+
 	/* Aborts an in-flight request so stop() does not wait out a 30s timeout. */
 	void cancel();
 
@@ -80,7 +86,12 @@ public:
 	static void global_cleanup();
 
 private:
-	HttpResult perform_locked(const std::string &path, bool post, void *mime, long timeout_seconds);
+	enum class Method { Get, Post, Delete };
+
+	/* json is sent as the body of a POST when not null; mime takes
+	 * precedence over it. */
+	HttpResult perform_locked(const std::string &path, Method method, void *mime, const std::string *json,
+				  long timeout_seconds);
 	std::string url_for(const std::string &path) const;
 
 	mutable std::mutex mutex_;

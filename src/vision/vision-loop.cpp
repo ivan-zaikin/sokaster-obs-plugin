@@ -93,7 +93,29 @@ void VisionLoop::stop()
 		worker_.join();
 
 	running_ = false;
+	set_health(VisionHealth::State::Idle);
 	obs_log(LOG_INFO, "vision: stopped");
+}
+
+VisionHealth VisionLoop::health() const
+{
+	std::lock_guard<std::mutex> lock(health_mutex_);
+	VisionHealth result = health_;
+
+	/* Counted down at read time, so the dock's "retrying in N s" moves on
+	 * its own between ticks instead of freezing at the first value. Rounded
+	 * up: "in 0 s" while a wait is still running reads as a bug. */
+	const uint64_t now = os_gettime_ns();
+	result.retry_seconds =
+		retry_until_ns_ > now ? static_cast<int>((retry_until_ns_ - now + 999999999ull) / 1000000000ull) : 0;
+	return result;
+}
+
+void VisionLoop::set_health(VisionHealth::State state, int retry_ms)
+{
+	std::lock_guard<std::mutex> lock(health_mutex_);
+	health_.state = state;
+	retry_until_ns_ = retry_ms > 0 ? os_gettime_ns() + static_cast<uint64_t>(retry_ms) * 1000000ull : 0;
 }
 
 bool VisionLoop::wait_for(int milliseconds)
@@ -149,6 +171,10 @@ void VisionLoop::run()
 
 		const FrameGrabber::Status status = grabber_.grab(cfg.max_width, cfg.max_height, frame);
 		if (status != FrameGrabber::Status::Ok) {
+			set_health(status == FrameGrabber::Status::NotReady ||
+						   status == FrameGrabber::Status::RenderFailed
+					   ? VisionHealth::State::Empty
+					   : VisionHealth::State::NoSource);
 			/* None of these are our failure to report loudly every tick:
 			 * the streamer is between scenes, or has not picked a source
 			 * yet. The dock will say so; the log says it once per tick at
@@ -171,6 +197,7 @@ void VisionLoop::run()
 
 		if (result.ok()) {
 			consecutive_failures = 0;
+			set_health(VisionHealth::State::Sending);
 			++frame_number;
 			obs_log(LOG_DEBUG, "vision: frame #%llu, %ux%u, %zu kB, %.0f ms",
 				static_cast<unsigned long long>(frame_number), frame.width, frame.height,
@@ -190,6 +217,7 @@ void VisionLoop::run()
 			/* A rejected key will stay rejected. Retrying forever would
 			 * only fill the streamer's log with the same line. */
 			obs_log(LOG_WARNING, "vision: server rejected the access key, stopping");
+			set_health(VisionHealth::State::KeyRejected);
 			break;
 		}
 
@@ -199,12 +227,14 @@ void VisionLoop::run()
 		if (result.rate_limited()) {
 			backoff = std::max(interval_ms_, kRateLimitBackoffMs);
 			obs_log(LOG_WARNING, "vision: rate limited, waiting %d ms", backoff);
+			set_health(VisionHealth::State::RateLimited, backoff);
 		} else {
 			/* Doubling, capped: 5s, 10s, 20s, 40s, 60s, 60s... */
 			const int shift = std::min(consecutive_failures - 1, 16);
 			const long long scaled = static_cast<long long>(interval_ms_) << shift;
 			backoff = static_cast<int>(std::min<long long>(scaled, kMaxBackoffMs));
 			obs_log(LOG_WARNING, "vision: send failed (%ld), retry in %d ms", result.status, backoff);
+			set_health(VisionHealth::State::Retrying, backoff);
 		}
 
 		if (!wait_for(backoff))

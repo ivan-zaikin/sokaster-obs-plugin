@@ -80,7 +80,36 @@ bool consider_item(obs_scene_t *, obs_sceneitem_t *item, void *param)
 	return true;
 }
 
+bool collect_item(obs_scene_t *, obs_sceneitem_t *item, void *param)
+{
+	auto *out = static_cast<std::vector<CaptureSourceInfo> *>(param);
+
+	obs_source_t *source = obs_sceneitem_get_source(item);
+	if (!source || !is_capture_source(source))
+		return true;
+
+	const char *uuid = obs_source_get_uuid(source);
+	const char *name = obs_source_get_name(source);
+	out->push_back({uuid ? uuid : "", name ? name : ""});
+	return true;
+}
+
 } // namespace
+
+std::vector<CaptureSourceInfo> list_capture_sources()
+{
+	std::vector<CaptureSourceInfo> result;
+
+	obs_source_t *scene_source = obs_frontend_get_current_scene();
+	if (!scene_source)
+		return result;
+
+	if (obs_scene_t *scene = obs_scene_from_source(scene_source))
+		obs_scene_enum_items(scene, collect_item, &result);
+
+	obs_source_release(scene_source);
+	return result;
+}
 
 obs_source_t *pick_default_source()
 {
