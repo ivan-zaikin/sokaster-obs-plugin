@@ -91,9 +91,27 @@ const char *level_colour(Readiness::Level level)
 	}
 }
 
+/* The server names categories after its enum (SelfHarm); the locale keys
+ * are the snake_case ids the safety judge uses (self_harm). */
+std::string category_key(const std::string &id)
+{
+	std::string key = "Dock.Category.";
+	for (size_t i = 0; i < id.size(); ++i) {
+		const char c = id[i];
+		if (c >= 'A' && c <= 'Z') {
+			if (i > 0)
+				key += '_';
+			key += static_cast<char>(c - 'A' + 'a');
+		} else {
+			key += c;
+		}
+	}
+	return key;
+}
+
 QString category_label(const std::string &id)
 {
-	const std::string key = "Dock.Category." + id;
+	const std::string key = category_key(id);
 	const char *label = nullptr;
 	if (obs_module_get_string(key.c_str(), &label) && label)
 		return QString::fromUtf8(label);
@@ -101,6 +119,32 @@ QString category_label(const std::string &id)
 	/* A category the server learned after this build: its id is still more
 	 * useful to the streamer than nothing. */
 	return QString::fromStdString(id);
+}
+
+/* A refusal in the streamer's language, worded by its code. Empty for a code
+ * this build does not know: the caller falls back to the server's text. */
+QString refusal_text(const sokaster::CommandResult &result)
+{
+	const std::string &code = result.code;
+
+	if (code == "blocked") {
+		if (result.categories.empty())
+			return text("Dock.Refusal.Blocked");
+		QStringList reasons;
+		for (const std::string &category : result.categories)
+			reasons << category_label(category);
+		return text("Dock.Refusal.BlockedWhy").arg(reasons.join(QStringLiteral(", ")));
+	}
+	if (code == "air_full")
+		return text("Dock.Refusal.AirFull").arg(result.ahead_minutes);
+	if (code == "not_admitted")
+		return text("Dock.Refusal.NotAdmitted");
+	if (code == "empty_prompt")
+		return text("Dock.Order.Empty");
+	if (code == "not_found")
+		return text("Dock.Queue.Gone");
+
+	return QString();
 }
 
 /* Voice hints come from the server in Russian. Elsewhere the id reads better
@@ -779,6 +823,8 @@ void SokasterDock::applyCommandResult(const sokaster::CommandResult &result)
 			/* The text stays: retyping a prompt because the network
 			 * blinked is the kind of thing that makes people give up. */
 			orderStatus_->setText(text("Dock.Order.Failed"));
+		} else if (const QString worded = refusal_text(result); !worded.isEmpty()) {
+			orderStatus_->setText(worded);
 		} else {
 			const QString reason = result.error.empty() ? QString::number(result.status)
 								    : QString::fromStdString(result.error);
@@ -794,9 +840,11 @@ void SokasterDock::applyCommandResult(const sokaster::CommandResult &result)
 		message = text("Dock.Queue.Stale");
 	else if (result.status == 404)
 		message = text("Dock.Queue.Gone");
-	else if (!result.ok)
-		message = result.error.empty() ? text("Dock.Queue.Gone") : QString::fromStdString(result.error);
-	else if (result.kind == Kind::Approve)
+	else if (!result.ok) {
+		message = refusal_text(result);
+		if (message.isEmpty())
+			message = result.error.empty() ? text("Dock.Queue.Gone") : QString::fromStdString(result.error);
+	} else if (result.kind == Kind::Approve)
 		message = text("Dock.Queue.Approved").arg(result.position);
 	else if (result.kind == Kind::Reject)
 		message = text("Dock.Queue.Rejected");

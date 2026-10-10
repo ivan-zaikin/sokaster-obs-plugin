@@ -95,6 +95,9 @@ struct ServerState {
 	double spent_usd = 0;
 	std::string donate_url;
 	bool overlay_connected = false;
+	/* More than one: every open overlay plays the voice, so viewers hear
+	 * the co-host twice. */
+	int overlay_count = 0;
 
 	/* GET /api/orders. */
 	bool have_orders = false;
@@ -119,8 +122,15 @@ struct CommandResult {
 	bool ok = false;
 	/* 0 when the server never answered. */
 	long status = 0;
-	/* The server's own "error" text, when it sent one. */
+	/* Why the server said no. The code is the contract and the dock words
+	 * it in the streamer's language; the "error" text is the server's own
+	 * Russian sentence, kept for codes this build does not know. */
+	std::string code;
 	std::string error;
+	/* air_full: how far ahead the co-host is already booked. */
+	int ahead_minutes = 0;
+	/* blocked: what the order was turned down for. */
+	std::vector<std::string> categories;
 
 	/* PlaceOrder and Approve: where the order landed. */
 	std::string state;

@@ -85,6 +85,9 @@ Row overlay_row(const LocalFacts &local, const ServerState &server)
 	const bool known = server.have_beta && server.link == ServerState::Link::Ok;
 
 	if (known && server.overlay_connected) {
+		/* Heard twice right now beats cut off at the next scene switch. */
+		if (server.overlay_count > 1)
+			return row(Level::Warn, text("Dock.Overlay.Duplicate").arg(server.overlay_count));
 		if (o.shutdown_when_hidden)
 			return row(Level::Warn, text("Dock.Overlay.Shutdown"));
 		if (o.where == OverlayPresence::Where::OtherScene)

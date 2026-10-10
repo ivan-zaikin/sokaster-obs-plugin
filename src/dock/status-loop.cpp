@@ -63,11 +63,17 @@ int integer(const QJsonObject &o, const char *key)
 	return o.value(QLatin1String(key)).toInt();
 }
 
-/* The server answers refusals as {"error": "..."}; anything else has no text
- * worth showing, and the dock falls back to its own words. */
-std::string error_text(const HttpResult &result)
+/* The server answers refusals as {"code", "error", ...}. A body without them
+ * (a proxy's error page, an older server) leaves both empty, and the dock
+ * falls back to its own words. */
+void read_refusal(const HttpResult &http, CommandResult &result)
 {
-	return str(parse_object(result.body), "error");
+	const QJsonObject o = parse_object(http.body);
+	result.code = str(o, "code");
+	result.error = str(o, "error");
+	result.ahead_minutes = integer(o, "aheadMinutes");
+	for (const QJsonValue &category : o.value(QLatin1String("categories")).toArray())
+		result.categories.push_back(category.toString().toStdString());
 }
 
 std::string encode_path_segment(const std::string &segment)
@@ -200,7 +206,7 @@ void StatusLoop::place_order(const std::string &prompt, const std::string &voice
 			result.position = integer(o, "position");
 			result.wait_seconds = integer(o, "waitSeconds");
 		} else {
-			result.error = error_text(http);
+			read_refusal(http, result);
 		}
 		report_command(result);
 	});
@@ -222,7 +228,7 @@ void StatusLoop::approve(const std::string &order_id)
 			result.position = integer(o, "position");
 			result.wait_seconds = integer(o, "waitSeconds");
 		} else {
-			result.error = error_text(http);
+			read_refusal(http, result);
 		}
 		report_command(result);
 	});
@@ -239,7 +245,7 @@ void StatusLoop::reject(const std::string &order_id)
 		result.status = http.status;
 		result.ok = http.ok();
 		if (!http.ok())
-			result.error = error_text(http);
+			read_refusal(http, result);
 		report_command(result);
 	});
 }
@@ -256,7 +262,7 @@ void StatusLoop::drop_on_air()
 		if (http.ok())
 			result.dropped = parse_object(http.body).value(QLatin1String("dropped")).toBool();
 		else
-			result.error = error_text(http);
+			read_refusal(http, result);
 		report_command(result);
 	});
 }
@@ -339,6 +345,7 @@ void StatusLoop::poll()
 	state_.spent_usd = o.value(QLatin1String("spentUsd")).toDouble();
 	state_.donate_url = str(o, "donateUrl");
 	state_.overlay_connected = o.value(QLatin1String("overlayConnected")).toBool();
+	state_.overlay_count = integer(o, "overlayCount");
 
 	const HttpResult orders = client_.get("/api/orders");
 	if (orders.ok()) {
