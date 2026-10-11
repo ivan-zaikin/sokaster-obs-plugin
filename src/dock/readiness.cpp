@@ -55,7 +55,7 @@ QString format_date(const std::string &iso)
 Row account_row(const LocalFacts &local, const ServerState &server)
 {
 	if (!local.configured)
-		return row(Level::Block, text("Dock.Account.PasteKey"));
+		return row(Level::Block, text("Dock.Account.SignIn.Hint"));
 
 	if (server.link == ServerState::Link::KeyRejected)
 		return row(Level::Block, text("Dock.Account.Expired"));

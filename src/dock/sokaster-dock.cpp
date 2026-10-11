@@ -209,12 +209,18 @@ SokasterDock::SokasterDock(QWidget *parent) : QWidget(parent)
 	sokaster::StatusLoop::instance().set_streaming(obs_frontend_streaming_active());
 	sokaster::StatusLoop::instance().start();
 
+	sokaster::LinkFlow::instance().set_sink([this](const sokaster::LinkEvent &event) {
+		QMetaObject::invokeMethod(this, [this, event] { applyLinkEvent(event); }, Qt::QueuedConnection);
+	});
+
 	connectSourceSignals();
 	refreshSources();
 }
 
 SokasterDock::~SokasterDock()
 {
+	sokaster::LinkFlow::instance().set_sink(nullptr);
+	sokaster::LinkFlow::instance().cancel();
 	sokaster::StatusLoop::instance().stop();
 	sokaster::StatusLoop::instance().set_sinks(nullptr, nullptr);
 	disconnectSourceSignals();
@@ -264,21 +270,55 @@ void SokasterDock::buildUi()
 	headline_->setFont(headlineFont);
 	layout->addWidget(headline_);
 
-	/* Account, with the key field for when there is no key or it stopped
-	 * working. Twitch sign-in replaces the field in the onboarding stage. */
+	/* Account: sign in through the site when there is no key or it stopped
+	 * working. The key field stays below as the way round a browser that
+	 * will not open. */
 	account_ = addRow(layout, "Dock.Account");
+
+	signInButton_ = new QPushButton(text("Dock.Account.SignIn"), content);
+	layout->addWidget(signInButton_);
+	connect(signInButton_, &QPushButton::clicked, this, &SokasterDock::onSignIn);
+
+	linkBox_ = new QWidget(content);
+	auto *linkLayout = new QVBoxLayout(linkBox_);
+	linkLayout->setContentsMargins(0, 0, 0, 0);
+	linkCode_ = new QLabel(linkBox_);
+	QFont codeFont = linkCode_->font();
+	codeFont.setBold(true);
+	linkCode_->setFont(codeFont);
+	linkCode_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	auto *waiting = wrapping_label(linkBox_);
+	waiting->setText(text("Dock.Account.Waiting"));
+	auto *cancelLink = new QPushButton(text("Dock.Account.Cancel"), linkBox_);
+	linkLayout->addWidget(linkCode_);
+	linkLayout->addWidget(waiting);
+	linkLayout->addWidget(cancelLink, 0, Qt::AlignLeft);
+	linkBox_->hide();
+	layout->addWidget(linkBox_);
+	connect(cancelLink, &QPushButton::clicked, this, &SokasterDock::onCancelSignIn);
+
+	linkStatus_ = wrapping_label(content);
+	linkStatus_->hide();
+	layout->addWidget(linkStatus_);
+
 	keyBox_ = new QWidget(content);
 	auto *keyLayout = new QHBoxLayout(keyBox_);
 	keyLayout->setContentsMargins(0, 0, 0, 0);
 	keyEdit_ = new QLineEdit(keyBox_);
 	keyEdit_->setEchoMode(QLineEdit::Password);
-	keyEdit_->setPlaceholderText(text("Dock.Account.Key"));
+	keyEdit_->setPlaceholderText(text("Dock.Account.PasteKey"));
 	auto *saveKey = new QPushButton(text("Dock.Account.Save"), keyBox_);
 	keyLayout->addWidget(keyEdit_, 1);
 	keyLayout->addWidget(saveKey);
 	layout->addWidget(keyBox_);
 	connect(saveKey, &QPushButton::clicked, this, &SokasterDock::onSaveKey);
 	connect(keyEdit_, &QLineEdit::returnPressed, this, &SokasterDock::onSaveKey);
+
+	signOutButton_ = new QPushButton(text("Dock.Account.SignOut"), content);
+	signOutButton_->setFlat(true);
+	signOutButton_->hide();
+	layout->addWidget(signOutButton_, 0, Qt::AlignLeft);
+	connect(signOutButton_, &QPushButton::clicked, this, &SokasterDock::onSignOut);
 
 	overlay_ = addRow(layout, "Dock.Overlay");
 	overlayButton_ = new QPushButton(content);
@@ -561,7 +601,11 @@ void SokasterDock::reevaluate()
 	paintRow(ears_, r.ears);
 	paintRow(air_, r.air);
 
-	keyBox_->setVisible(r.ask_for_key);
+	signInButton_->setVisible(r.ask_for_key && !linking_);
+	linkBox_->setVisible(r.ask_for_key && linking_);
+	linkStatus_->setVisible(r.ask_for_key && !linking_ && !linkStatus_->text().isEmpty());
+	keyBox_->setVisible(r.ask_for_key && !linking_);
+	signOutButton_->setVisible(local.configured && !r.ask_for_key);
 	donateButton_->setVisible(r.offer_donate_link);
 
 	const bool canOrder = r.order_enabled && !sending_;
@@ -878,14 +922,78 @@ void SokasterDock::onSaveKey()
 	if (key.isEmpty())
 		return;
 
+	keyEdit_->clear();
+	obs_log(LOG_INFO, "config: access key replaced from the dock");
+	applyKey(key.toStdString());
+}
+
+void SokasterDock::onSignIn()
+{
+	linking_ = true;
+	linkCode_->setText(QString());
+	linkStatus_->clear();
+	sokaster::LinkFlow::instance().start(backendBase());
+	reevaluate();
+}
+
+void SokasterDock::onCancelSignIn()
+{
+	sokaster::LinkFlow::instance().cancel();
+	linking_ = false;
+	reevaluate();
+}
+
+void SokasterDock::onSignOut()
+{
 	sokaster::Config cfg = sokaster::config::get();
-	cfg.access_key = key.toStdString();
+	cfg.access_key.clear();
+	sokaster::config::set(cfg);
+	obs_log(LOG_INFO, "config: signed out from the dock");
+
+	/* Nothing to send with: the loops stop rather than knock without a key. */
+	sokaster::VisionLoop::instance().stop();
+	sokaster::AudioLoop::instance().stop();
+	sokaster::StatusLoop::instance().reconfigure();
+	linkStatus_->clear();
+	reevaluate();
+}
+
+void SokasterDock::applyLinkEvent(const sokaster::LinkEvent &event)
+{
+	using Kind = sokaster::LinkEvent::Kind;
+
+	if (event.kind == Kind::Code) {
+		linkCode_->setText(text("Dock.Account.Code").arg(QString::fromStdString(event.user_code)));
+		/* Only a page of the server we talk to: the address came over the
+		 * network, and opening whatever arrived is how a browser gets sent
+		 * somewhere it should not go. */
+		const std::string prefix = backendBase() + "/";
+		if (event.url.rfind(prefix, 0) == 0)
+			QDesktopServices::openUrl(QUrl(QString::fromStdString(event.url)));
+		else
+			obs_log(LOG_WARNING, "link: not opening a sign-in page outside the server");
+		reevaluate();
+		return;
+	}
+
+	linking_ = false;
+	if (event.kind == Kind::Done) {
+		linkStatus_->clear();
+		applyKey(event.access_key);
+		return;
+	}
+
+	linkStatus_->setText(text("Dock.Account.Failed"));
+	reevaluate();
+}
+
+void SokasterDock::applyKey(const std::string &key)
+{
+	sokaster::Config cfg = sokaster::config::get();
+	cfg.access_key = key;
 	if (cfg.backend_url.empty())
 		cfg.backend_url = sokaster::kDefaultBackendUrl;
 	sokaster::config::set(cfg);
-	keyEdit_->clear();
-
-	obs_log(LOG_INFO, "config: access key replaced from the dock");
 
 	sokaster::StatusLoop::instance().reconfigure();
 
@@ -912,14 +1020,19 @@ void SokasterDock::onCopyDonateLink()
 	QTimer::singleShot(2000, this, [this] { donateButton_->setText(text("Dock.Air.CopyDonate")); });
 }
 
-QString SokasterDock::dashboardUrl() const
+std::string SokasterDock::backendBase() const
 {
 	std::string base = sokaster::config::get().backend_url;
 	if (base.empty())
 		base = sokaster::kDefaultBackendUrl;
 	while (!base.empty() && base.back() == '/')
 		base.pop_back();
-	return QString::fromStdString(base + kDashboardPath);
+	return base;
+}
+
+QString SokasterDock::dashboardUrl() const
+{
+	return QString::fromStdString(backendBase() + kDashboardPath);
 }
 
 void SokasterDock::onOpenDashboard()

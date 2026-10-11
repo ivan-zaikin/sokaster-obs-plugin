@@ -52,6 +52,8 @@ target_sources(
     src/plugin-main.cpp
     src/plugin-config.cpp
     src/plugin-config.hpp
+    src/dock/link-flow.cpp
+    src/dock/link-flow.hpp
     src/dock/overlay-finder.cpp
     src/dock/overlay-finder.hpp
     src/dock/readiness.cpp

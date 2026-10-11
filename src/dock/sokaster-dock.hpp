@@ -18,6 +18,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #pragma once
 
+#include "link-flow.hpp"
 #include "readiness.hpp"
 #include "status-loop.hpp"
 
@@ -75,6 +76,9 @@ private slots:
 	void onOrderTextChanged();
 	void onSendOrder();
 	void onSaveKey();
+	void onSignIn();
+	void onCancelSignIn();
+	void onSignOut();
 	void onCopyDonateLink();
 	void onOpenDashboard();
 	void onOverlayFix();
@@ -110,6 +114,11 @@ private:
 	void refreshHears();
 
 	void applyServerState(const sokaster::ServerState &state);
+	void applyLinkEvent(const sokaster::LinkEvent &event);
+
+	/* Stores a key, from the field or from the sign-in, and makes every
+	 * loop pick it up. */
+	void applyKey(const std::string &key);
 	void applyCommandResult(const sokaster::CommandResult &result);
 
 	sokaster::LocalFacts gatherLocal();
@@ -128,13 +137,24 @@ private:
 	void rebuildVoices();
 	void updateTimer();
 
+	/* The server, without a trailing slash: the configured one, or the
+	 * public default before anything is configured. */
+	std::string backendBase() const;
 	QString dashboardUrl() const;
 
 	QLabel *headline_ = nullptr;
 
 	RowWidgets account_;
+	QPushButton *signInButton_ = nullptr;
+	/* While the sign-in waits for the browser: the code and a way out. */
+	QWidget *linkBox_ = nullptr;
+	QLabel *linkCode_ = nullptr;
+	/* Why the last sign-in did not finish; empty once it did. */
+	QLabel *linkStatus_ = nullptr;
 	QWidget *keyBox_ = nullptr;
 	QLineEdit *keyEdit_ = nullptr;
+	QPushButton *signOutButton_ = nullptr;
+	bool linking_ = false;
 
 	RowWidgets overlay_;
 	QPushButton *overlayButton_ = nullptr;
