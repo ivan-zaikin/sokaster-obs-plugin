@@ -79,33 +79,52 @@ Row account_row(const LocalFacts &local, const ServerState &server)
  * what will cut it off. Connected wins: if the co-host can be heard, the rest
  * is advice.
  */
-Row overlay_row(const LocalFacts &local, const ServerState &server)
+Row overlay_row(const LocalFacts &local, const ServerState &server, Readiness::OverlayFix *fix)
 {
+	using Fix = Readiness::OverlayFix;
+
 	const OverlayPresence &o = local.overlay;
 	const bool known = server.have_beta && server.link == ServerState::Link::Ok;
+	*fix = Fix::None;
 
 	if (known && server.overlay_connected) {
-		/* Heard twice right now beats cut off at the next scene switch. */
+		/* Heard twice right now beats cut off at the next scene switch.
+		 * No button: which copy to remove is the streamer's call. */
 		if (server.overlay_count > 1)
 			return row(Level::Warn, text("Dock.Overlay.Duplicate").arg(server.overlay_count));
-		if (o.shutdown_when_hidden)
+		if (o.shutdown_when_hidden) {
+			*fix = Fix::KeepRunning;
 			return row(Level::Warn, text("Dock.Overlay.Shutdown"));
-		if (o.where == OverlayPresence::Where::OtherScene)
+		}
+		if (o.where == OverlayPresence::Where::OtherScene) {
+			*fix = Fix::Add;
 			return row(Level::Warn, text("Dock.Overlay.OtherScene"));
+		}
 		return row(Level::Ok, text("Dock.Overlay.Ok"));
 	}
 
-	if (o.where == OverlayPresence::Where::Missing)
+	if (o.where == OverlayPresence::Where::Missing) {
+		*fix = Fix::Add;
 		return row(Level::Block, text("Dock.Overlay.Missing"));
-	if (o.stale)
+	}
+	if (o.stale) {
+		*fix = Fix::Update;
 		return row(Level::Block, text("Dock.Overlay.Stale"));
+	}
 	if (!known)
 		return row(Level::Neutral, QString());
 
+	/* Just added or re-pointed: the page takes a few seconds to load and
+	 * connect, and "not connected" in that time reads like a failure. */
+	if (local.overlay_placing)
+		return row(Level::Neutral, text("Dock.Overlay.Connecting"));
+
 	/* Present in OBS but not connected. The flag is the likeliest reason
 	 * once the stream has moved to another scene. */
-	if (o.shutdown_when_hidden && o.where == OverlayPresence::Where::OtherScene)
+	if (o.shutdown_when_hidden && o.where == OverlayPresence::Where::OtherScene) {
+		*fix = Fix::KeepRunning;
 		return row(Level::Block, text("Dock.Overlay.Shutdown"));
+	}
 	return row(Level::Block, text("Dock.Overlay.Disconnected"));
 }
 
@@ -232,7 +251,7 @@ Readiness evaluate_readiness(const LocalFacts &local, const ServerState &server,
 	Readiness r;
 
 	r.account = account_row(local, server);
-	r.overlay = overlay_row(local, server);
+	r.overlay = overlay_row(local, server, &r.overlay_fix);
 	r.eyes = eyes_row(local, server);
 	r.ears = ears_row(local);
 	r.air = air_row(local, server, now_ns, &r.offer_donate_link);

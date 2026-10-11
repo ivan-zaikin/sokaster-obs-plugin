@@ -67,6 +67,10 @@ constexpr int kMaxPromptLength = 400;
 /* The rest of the dashboard lives on the profile page. */
 constexpr const char *kDashboardPath = "/profile";
 
+/* How long after a fix the overlay row says "connecting" rather than "not
+ * connected": the page loads and opens its connection in a few seconds. */
+constexpr uint64_t kOverlayPlacingNs = 20ull * 1000000000ull;
+
 const char *const kSourceSignals[] = {"source_create", "source_destroy", "source_rename"};
 
 QString text(const char *key)
@@ -277,6 +281,10 @@ void SokasterDock::buildUi()
 	connect(keyEdit_, &QLineEdit::returnPressed, this, &SokasterDock::onSaveKey);
 
 	overlay_ = addRow(layout, "Dock.Overlay");
+	overlayButton_ = new QPushButton(content);
+	overlayButton_->hide();
+	layout->addWidget(overlayButton_);
+	connect(overlayButton_, &QPushButton::clicked, this, &SokasterDock::onOverlayFix);
 
 	eyes_ = addRow(layout, "Dock.Eyes");
 	watches_ = new QComboBox(content);
@@ -520,6 +528,7 @@ sokaster::LocalFacts SokasterDock::gatherLocal()
 	local.audio = audio.health();
 
 	local.overlay = sokaster::find_overlay(server_.overlay_token);
+	local.overlay_placing = overlayPlacedAt_ != 0 && os_gettime_ns() - overlayPlacedAt_ < kOverlayPlacingNs;
 	return local;
 }
 
@@ -547,6 +556,7 @@ void SokasterDock::reevaluate()
 
 	paintRow(account_, r.account);
 	paintRow(overlay_, r.overlay);
+	paintOverlayFix(r.overlay_fix, local.overlay);
 	paintRow(eyes_, r.eyes);
 	paintRow(ears_, r.ears);
 	paintRow(air_, r.air);
@@ -915,4 +925,84 @@ QString SokasterDock::dashboardUrl() const
 void SokasterDock::onOpenDashboard()
 {
 	QDesktopServices::openUrl(QUrl(dashboardUrl()));
+}
+
+void SokasterDock::paintOverlayFix(Readiness::OverlayFix fix, const sokaster::OverlayPresence &found)
+{
+	using Fix = Readiness::OverlayFix;
+
+	overlayFix_ = fix;
+	lastOverlay_ = found;
+
+	const char *key = nullptr;
+	switch (fix) {
+	case Fix::Add:
+		key = "Dock.Overlay.Add";
+		break;
+	case Fix::Update:
+		key = "Dock.Overlay.Update";
+		break;
+	case Fix::KeepRunning:
+		key = "Dock.Overlay.Shutdown.Fix";
+		break;
+	default:
+		break;
+	}
+
+	overlayButton_->setVisible(key != nullptr);
+	if (!key)
+		return;
+
+	overlayButton_->setText(text(key));
+	/* An address needs the token; until the server has named it, a new
+	 * overlay would point nowhere. */
+	overlayButton_->setEnabled(fix == Fix::KeepRunning || !server_.overlay_token.empty());
+}
+
+void SokasterDock::onOverlayFix()
+{
+	using Fix = Readiness::OverlayFix;
+
+	std::string base = sokaster::config::get().backend_url;
+	if (base.empty())
+		base = sokaster::kDefaultBackendUrl;
+	const std::string url = sokaster::overlay_url(base, server_.overlay_token);
+
+	bool done = false;
+	switch (overlayFix_) {
+	case Fix::Add:
+		done = sokaster::add_overlay_to_current_scene(lastOverlay_, url,
+							      obs_module_text("Dock.Overlay.SourceName"),
+							      sokaster::AudioLoop::instance().track());
+		break;
+	case Fix::Update:
+		done = sokaster::set_overlay_url(lastOverlay_.source_uuid, url);
+		break;
+	case Fix::KeepRunning:
+		done = sokaster::keep_overlay_running(lastOverlay_.source_uuid);
+		break;
+	default:
+		return;
+	}
+
+	/* Said on the button itself, the way "Copied" is: the reason is in the
+	 * OBS log, and a row of its own would outlive the moment. */
+	if (!done) {
+		overlayButton_->setText(text("Dock.Overlay.Failed"));
+		QTimer::singleShot(3000, this, [this] { reevaluate(); });
+		return;
+	}
+
+	/* The page needs a few seconds to load and connect; ask the server
+	 * about it then, rather than at the next routine poll. */
+	if (overlayFix_ != Fix::KeepRunning) {
+		overlayPlacedAt_ = os_gettime_ns();
+		for (int ms : {4000, 10000})
+			QTimer::singleShot(ms, this, [] { sokaster::StatusLoop::instance().poke(); });
+		QTimer::singleShot(static_cast<int>(kOverlayPlacingNs / 1000000ull) + 100, this,
+				   [this] { reevaluate(); });
+	}
+
+	refreshHears();
+	reevaluate();
 }

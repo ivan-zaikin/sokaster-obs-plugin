@@ -43,6 +43,9 @@ struct LocalFacts {
 	AudioHealth audio;
 
 	OverlayPresence overlay;
+	/* The streamer just added the overlay or fixed its address, and the
+	 * page is still loading: say so instead of "not connected". */
+	bool overlay_placing = false;
 };
 
 /*
@@ -69,9 +72,21 @@ struct Readiness {
 		QString text;
 	};
 
+	/* The one fix the overlay row offers, as a button under it. */
+	enum class OverlayFix {
+		None,
+		/* Into the current scene: ours from another scene, or a new one. */
+		Add,
+		/* The overlay points at an old token. */
+		Update,
+		/* Clear "Shutdown source when not visible". */
+		KeepRunning,
+	};
+
 	QString headline;
 	Row account;
 	Row overlay;
+	OverlayFix overlay_fix = OverlayFix::None;
 	Row eyes;
 	Row ears;
 	Row air;

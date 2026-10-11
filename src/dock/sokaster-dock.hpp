@@ -77,6 +77,7 @@ private slots:
 	void onSaveKey();
 	void onCopyDonateLink();
 	void onOpenDashboard();
+	void onOverlayFix();
 	void onTick();
 
 private:
@@ -117,6 +118,7 @@ private:
 	 * walk over the scene collection at most. */
 	void reevaluate();
 	void paintRow(RowWidgets &row, const sokaster::Readiness::Row &value);
+	void paintOverlayFix(sokaster::Readiness::OverlayFix fix, const sokaster::OverlayPresence &found);
 
 	void rebuildQueue();
 	void updateQueueLines();
@@ -135,6 +137,12 @@ private:
 	QLineEdit *keyEdit_ = nullptr;
 
 	RowWidgets overlay_;
+	QPushButton *overlayButton_ = nullptr;
+	/* What the button does and to which source, as of the last repaint. */
+	sokaster::Readiness::OverlayFix overlayFix_ = sokaster::Readiness::OverlayFix::None;
+	sokaster::OverlayPresence lastOverlay_;
+	/* os_gettime_ns() of the last fix, for "connecting" while the page loads. */
+	uint64_t overlayPlacedAt_ = 0;
 
 	RowWidgets eyes_;
 	QComboBox *watches_ = nullptr;

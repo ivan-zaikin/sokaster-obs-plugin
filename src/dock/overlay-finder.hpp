@@ -48,10 +48,37 @@ struct OverlayPresence {
 	/* "Shutdown source when not visible": the page unloads on a scene switch
 	 * and the co-host goes quiet until it comes back. */
 	bool shutdown_when_hidden = false;
+
+	/* The browser source all of the above is about; empty when Missing.
+	 * The fixes below act on exactly this one, never on every overlay in the
+	 * collection — two connected copies would play the voice twice. */
+	std::string source_uuid;
 };
 
 /* token may be empty when it is not known yet; then any overlay page counts
  * and none is stale. Frontend API inside, so UI thread only. */
 OverlayPresence find_overlay(const std::string &token);
+
+/* The address of this account's overlay page: <backend>/overlay/<token>. */
+std::string overlay_url(const std::string &backend_url, const std::string &token);
+
+/*
+ * Puts the overlay into the current scene. An overlay of ours found in another
+ * scene is added as a reference to the same source — one source is one page and
+ * one connection, so the voice is heard once. Otherwise a new browser source is
+ * made: fitted to the canvas, its audio controlled by OBS, kept running when
+ * hidden, and left off listen_track so the co-host does not hear itself.
+ *
+ * Only on the streamer's click: the plugin never edits a scene on its own.
+ * listen_track is -1 when there is none. False when nothing could be done.
+ */
+bool add_overlay_to_current_scene(const OverlayPresence &found, const std::string &url, const char *new_name,
+				  int listen_track);
+
+/* Points the given overlay source at url. */
+bool set_overlay_url(const std::string &source_uuid, const std::string &url);
+
+/* Clears "Shutdown source when not visible" on the given overlay source. */
+bool keep_overlay_running(const std::string &source_uuid);
 
 } // namespace sokaster

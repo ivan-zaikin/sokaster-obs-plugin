@@ -17,9 +17,11 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
 #include "overlay-finder.hpp"
+#include "audio/audio-tap.hpp"
 
 #include <obs-frontend-api.h>
 #include <obs.h>
+#include <plugin-support.h>
 
 #include <cstring>
 
@@ -29,10 +31,16 @@ namespace {
 /* The path every overlay page lives under; the token follows it. */
 constexpr const char *kOverlayPath = "/overlay/";
 
+/* The page is laid out for this size; another canvas gets it scaled to fit
+ * rather than reflowed. */
+constexpr int kPageWidth = 1920;
+constexpr int kPageHeight = 1080;
+
 struct Candidate {
 	bool found = false;
 	bool matches_token = false;
 	bool shutdown_when_hidden = false;
+	std::string uuid;
 };
 
 struct Search {
@@ -65,6 +73,7 @@ void consider_source(obs_source_t *source, Search *search)
 		search->best.found = true;
 		search->best.matches_token = matches;
 		search->best.shutdown_when_hidden = shutdown;
+		search->best.uuid = obs_source_get_uuid(source);
 	}
 }
 
@@ -112,6 +121,7 @@ OverlayPresence find_overlay(const std::string &token)
 			result.where = OverlayPresence::Where::CurrentScene;
 			result.stale = !here.matches_token;
 			result.shutdown_when_hidden = here.shutdown_when_hidden;
+			result.source_uuid = here.uuid;
 			if (here.matches_token)
 				return result;
 		}
@@ -140,7 +150,151 @@ OverlayPresence find_overlay(const std::string &token)
 	result.where = OverlayPresence::Where::OtherScene;
 	result.stale = !elsewhere.matches_token;
 	result.shutdown_when_hidden = elsewhere.shutdown_when_hidden;
+	result.source_uuid = elsewhere.uuid;
 	return result;
+}
+
+std::string overlay_url(const std::string &backend_url, const std::string &token)
+{
+	std::string base = backend_url;
+	while (!base.empty() && base.back() == '/')
+		base.pop_back();
+	return base + kOverlayPath + token;
+}
+
+namespace {
+
+/* Writes the given settings into a source by UUID; the browser source reloads
+ * the page by itself when its URL changes. */
+bool update_source(const std::string &uuid, obs_data_t *changes)
+{
+	if (uuid.empty())
+		return false;
+
+	obs_source_t *source = obs_get_source_by_uuid(uuid.c_str());
+	if (!source)
+		return false;
+
+	obs_source_update(source, changes);
+	obs_source_release(source);
+	return true;
+}
+
+/* OBS keeps source names unique in its own dialogs; so do we, or the streamer
+ * is left with two identical lines in the source list. */
+std::string unique_name(const char *base)
+{
+	std::string name = base;
+	for (int n = 2;; ++n) {
+		obs_source_t *existing = obs_get_source_by_name(name.c_str());
+		if (!existing)
+			return name;
+		obs_source_release(existing);
+		name = std::string(base) + " " + std::to_string(n);
+	}
+}
+
+void fit_to_canvas(obs_sceneitem_t *item)
+{
+	struct obs_video_info ovi = {};
+	if (!obs_get_video_info(&ovi))
+		return;
+
+	struct vec2 bounds;
+	vec2_set(&bounds, static_cast<float>(ovi.base_width), static_cast<float>(ovi.base_height));
+	obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_SCALE_INNER);
+	obs_sceneitem_set_bounds(item, &bounds);
+}
+
+obs_source_t *create_overlay_source(const std::string &url, const char *new_name)
+{
+	/* Without obs-browser there is nothing to make; creating it anyway would
+	 * leave a dead "missing source" in the scene. */
+	if (!obs_get_source_output_flags("browser_source"))
+		return nullptr;
+
+	obs_data_t *settings = obs_data_create();
+	obs_data_set_string(settings, "url", url.c_str());
+	obs_data_set_int(settings, "width", kPageWidth);
+	obs_data_set_int(settings, "height", kPageHeight);
+	/* The voice comes out of this page: through OBS it reaches the stream and
+	 * the mixer, not only the streamer's speakers. */
+	obs_data_set_bool(settings, "reroute_audio", true);
+	obs_data_set_bool(settings, "shutdown", false);
+
+	const std::string name = unique_name(new_name);
+	obs_source_t *source = obs_source_create("browser_source", name.c_str(), settings, nullptr);
+	obs_data_release(settings);
+	return source;
+}
+
+} // namespace
+
+bool add_overlay_to_current_scene(const OverlayPresence &found, const std::string &url, const char *new_name,
+				  int listen_track)
+{
+	obs_source_t *current = obs_frontend_get_current_scene();
+	if (!current)
+		return false;
+
+	obs_scene_t *scene = obs_scene_from_source(current);
+	bool fresh = false;
+	obs_source_t *source = nullptr;
+
+	/* Ours, elsewhere: the same source once more. A stale one is not reused —
+	 * that would be the old address in one more scene. */
+	if (found.where == OverlayPresence::Where::OtherScene && !found.stale && !found.source_uuid.empty())
+		source = obs_get_source_by_uuid(found.source_uuid.c_str());
+
+	if (!source) {
+		source = create_overlay_source(url, new_name);
+		fresh = true;
+	}
+
+	bool placed = false;
+	if (scene && source) {
+		if (obs_sceneitem_t *item = obs_scene_add(scene, source)) {
+			fit_to_canvas(item);
+			placed = true;
+		}
+	}
+
+	if (placed && fresh && listen_track >= 0)
+		tracks::set_source_heard(obs_source_get_uuid(source), static_cast<size_t>(listen_track), false);
+
+	if (placed)
+		obs_log(LOG_INFO, "overlay: %s in scene '%s'", fresh ? "created" : "added",
+			obs_source_get_name(current));
+	else
+		obs_log(LOG_WARNING, "overlay: could not add to scene '%s'", obs_source_get_name(current));
+
+	obs_source_release(source);
+	obs_source_release(current);
+	return placed;
+}
+
+bool set_overlay_url(const std::string &source_uuid, const std::string &url)
+{
+	obs_data_t *changes = obs_data_create();
+	obs_data_set_string(changes, "url", url.c_str());
+	const bool ok = update_source(source_uuid, changes);
+	obs_data_release(changes);
+
+	if (ok)
+		obs_log(LOG_INFO, "overlay: address updated");
+	return ok;
+}
+
+bool keep_overlay_running(const std::string &source_uuid)
+{
+	obs_data_t *changes = obs_data_create();
+	obs_data_set_bool(changes, "shutdown", false);
+	const bool ok = update_source(source_uuid, changes);
+	obs_data_release(changes);
+
+	if (ok)
+		obs_log(LOG_INFO, "overlay: shutdown-when-hidden cleared");
+	return ok;
 }
 
 } // namespace sokaster
