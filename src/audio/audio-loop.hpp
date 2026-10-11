@@ -69,8 +69,9 @@ public:
 	/* The OBS track the co-host listens to, 0-based. Valid once started. */
 	int track() const { return track_; }
 
-	/* Picks a track and remembers it, or returns the remembered one.
-	 * Frontend-free, but touches sources, so not before FINISHED_LOADING. */
+	/* Picks a track and remembers it, or returns the remembered one while
+	 * no output has taken it since. Reads the profile and touches sources,
+	 * so UI thread and not before FINISHED_LOADING. */
 	int resolve_track();
 
 	/* False while no source is ticked: the co-host hears silence, and the

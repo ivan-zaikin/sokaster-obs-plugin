@@ -54,27 +54,34 @@ AudioLoop &AudioLoop::instance()
 int AudioLoop::resolve_track()
 {
 	Config cfg = config::get();
+	const uint32_t taken = tracks::output_tracks();
 
-	if (cfg.audio_track >= 0) {
-		track_ = cfg.audio_track;
-		return track_;
+	if (cfg.audio_track >= 0 && cfg.audio_track < MAX_AUDIO_MIXES) {
+		if ((taken & (1u << cfg.audio_track)) == 0) {
+			track_ = cfg.audio_track;
+			return track_;
+		}
+		/* The streamer has since put our track into a stream or a
+		 * recording. The ticks on it are theirs now; we move out. */
+		obs_log(LOG_WARNING, "audio: track %d is now sent by an output, picking another", cfg.audio_track + 1);
 	}
 
-	uint32_t used = 0;
-	const int free_track = tracks::find_free(&used);
+	const int free_track = tracks::find_free(taken);
 	if (free_track < 0) {
 		/* Six tracks, all spoken for. Taking one anyway would push game
 		 * audio into somebody's finished recording. */
-		obs_log(LOG_WARNING, "audio: every OBS track is in use, nothing to listen on");
+		obs_log(LOG_WARNING, "audio: every OBS track is sent by an output, nothing to listen on");
 		track_ = -1;
 		return -1;
 	}
+
+	tracks::clear_track(static_cast<size_t>(free_track));
 
 	track_ = free_track;
 	cfg.audio_track = free_track;
 	config::set(cfg);
 
-	obs_log(LOG_INFO, "audio: took track %d (tracks in use: 0x%02x)", free_track + 1, used);
+	obs_log(LOG_INFO, "audio: took track %d (tracks sent by outputs: 0x%02x)", free_track + 1, taken);
 	return track_;
 }
 

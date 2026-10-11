@@ -21,6 +21,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <plugin-support.h>
 
 #include <media-io/audio-io.h>
+#include <obs-frontend-api.h>
+#include <util/config-file.h>
 
 #include <cstring>
 
@@ -190,24 +192,85 @@ bool collect_used_mixers(void *param, obs_source_t *source)
 	return true;
 }
 
+/* OBS stores single tracks 1-based, sets of tracks as a bitmask. */
+uint32_t track_bit(int64_t one_based)
+{
+	return one_based >= 1 && one_based <= MAX_AUDIO_MIXES ? 1u << (one_based - 1) : 0;
+}
+
+bool equals(const char *value, const char *expected)
+{
+	return value && strcmp(value, expected) == 0;
+}
+
+bool strip_track(void *param, obs_source_t *source)
+{
+	if (!has_audio(source))
+		return true;
+
+	const uint32_t bit = *static_cast<const uint32_t *>(param);
+	const uint32_t mixers = obs_source_get_audio_mixers(source);
+	if (mixers & bit)
+		obs_source_set_audio_mixers(source, mixers & ~bit);
+	return true;
+}
+
 } // namespace
 
-int find_free(uint32_t *used_mask_out)
+uint32_t output_tracks()
 {
-	MixerScan scan;
-	obs_enum_sources(collect_used_mixers, &scan);
+	config_t *profile = obs_frontend_get_profile_config();
+	/* No profile to read means we cannot tell; claim nothing then. */
+	if (!profile)
+		return (1u << MAX_AUDIO_MIXES) - 1;
 
-	if (used_mask_out)
-		*used_mask_out = scan.used;
+	uint32_t used = 0;
 
+	if (equals(config_get_string(profile, "Output", "Mode"), "Advanced")) {
+		used |= track_bit(config_get_int(profile, "AdvOut", "TrackIndex"));
+		used |= static_cast<uint32_t>(config_get_int(profile, "AdvOut", "StreamMultiTrackAudioMixes"));
+		if (config_get_bool(profile, "AdvOut", "VodTrackEnabled"))
+			used |= track_bit(config_get_int(profile, "AdvOut", "VodTrackIndex"));
+
+		if (equals(config_get_string(profile, "AdvOut", "RecType"), "FFmpeg")) {
+			used |= static_cast<uint32_t>(config_get_int(profile, "AdvOut", "FFAudioMixes"));
+		} else {
+			/* Both, whichever the format: FLV records one track and the
+			 * rest several, and a format change must not catch us on a
+			 * recorded track. */
+			used |= static_cast<uint32_t>(config_get_int(profile, "AdvOut", "RecTracks"));
+			used |= track_bit(config_get_int(profile, "AdvOut", "FLVTrack"));
+		}
+	} else {
+		/* Simple mode streams track 1 and, with the VOD track on, track 2. */
+		used |= 1u;
+		if (config_get_bool(profile, "SimpleOutput", "VodTrackEnabled"))
+			used |= 1u << 1;
+		/* "Same as stream" records the stream's track; any other quality
+		 * records the tracks ticked under it. */
+		if (!equals(config_get_string(profile, "SimpleOutput", "RecQuality"), "Stream"))
+			used |= static_cast<uint32_t>(config_get_int(profile, "SimpleOutput", "RecTracks"));
+	}
+
+	return used & ((1u << MAX_AUDIO_MIXES) - 1);
+}
+
+int find_free(uint32_t taken)
+{
 	/* From the back, because the low tracks are the ones people actually use:
 	 * track 1 is the stream, and 2-4 are the usual VOD splits. */
 	for (int index = MAX_AUDIO_MIXES - 1; index >= 0; --index) {
-		if ((scan.used & (1u << index)) == 0)
+		if ((taken & (1u << index)) == 0)
 			return index;
 	}
 
 	return -1;
+}
+
+void clear_track(size_t mix_index)
+{
+	uint32_t bit = 1u << mix_index;
+	obs_enum_sources(strip_track, &bit);
 }
 
 namespace {

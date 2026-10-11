@@ -99,13 +99,29 @@ private:
 namespace tracks {
 
 /*
- * Picks a track no source is routed to, counting from the last one down.
+ * The tracks OBS sends anywhere: the stream, the VOD track, the recording,
+ * as set in Settings -> Output of the current profile. A bitmask.
+ *
+ * This, and not which sources are routed where, is what makes a track taken:
+ * OBS routes every new source to all six tracks by default, so by the routing
+ * every track is always busy. A track no output carries is free whatever is
+ * routed to it — nobody will ever hear it but us.
+ */
+uint32_t output_tracks();
+
+/*
+ * Picks a track outside `taken`, counting from the last one down.
  *
  * Plenty of streamers record several tracks for VOD editing, so quietly
  * borrowing track 6 could put game audio into someone's finished recording.
  * Returns the mix index, or -1 when every track is already spoken for.
  */
-int find_free(uint32_t *used_mask_out = nullptr);
+int find_free(uint32_t taken);
+
+/* Unroutes every source from the track. Done once, when the track becomes
+ * ours: by OBS defaults everything is already on it, the microphone included,
+ * and the co-host should hear only what the streamer ticks. */
+void clear_track(size_t mix_index);
 
 /* Which sources can be heard at all, and which are ticked for our track. */
 struct AudioSourceInfo {

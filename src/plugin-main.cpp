@@ -73,6 +73,13 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 		refresh_dock();
 		break;
 
+	case OBS_FRONTEND_EVENT_PROFILE_CHANGED:
+		/* Another profile, other output settings: our track may be the
+		 * one this profile records. */
+		sokaster::AudioLoop::instance().resolve_track();
+		refresh_dock();
+		break;
+
 	case OBS_FRONTEND_EVENT_SCENE_CHANGED:
 		/* A new scene can bring audio sources of its own along with it. */
 		refresh_dock();
