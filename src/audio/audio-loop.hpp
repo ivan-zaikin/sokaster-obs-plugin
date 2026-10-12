@@ -22,8 +22,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "vad-segmenter.hpp"
 #include "net/backend-client.hpp"
 
-#include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <mutex>
 #include <thread>
@@ -39,9 +39,9 @@ struct AudioHealth {
 		Listening,
 		/* 403: speech is off for this account. A setting, not a fault. */
 		SpeechDisabled,
-		/* silero_vad.onnx did not load; nothing can be heard. */
+		/* silero_vad.onnx did not load. */
 		VadFailed,
-		/* 429 or a failed upload; retry_seconds counts down to the next. */
+		/* 429 or a failed upload; retry_seconds counts down. */
 		Retrying,
 		KeyRejected,
 	};
@@ -51,72 +51,58 @@ struct AudioHealth {
 };
 
 /*
- * The ears: a track OBS mixes for us, a worker that turns it into utterances,
- * and a second worker that posts them.
- *
- * Two threads rather than one because an upload takes as long as the network
- * takes, and the VAD must not stop listening while it happens.
+ * The ears: an OBS track mixed for us, a worker that cuts it into utterances,
+ * and a second worker that posts them — an upload takes as long as the
+ * network takes, and the VAD must not stop listening meanwhile.
  */
 class AudioLoop {
 public:
 	static AudioLoop &instance();
 
+	/* UI thread. No-op when unconfigured or without a track. */
 	void start();
+
+	/* UI thread. Joins both workers. Safe to call when not running. */
 	void stop();
 
-	bool running() const { return running_; }
-
-	/* The OBS track the co-host listens to, 0-based. Valid once started. */
+	/* The OBS track the co-host listens to, 0-based, or -1. */
 	int track() const { return track_; }
 
-	/* Picks a track and remembers it, or returns the remembered one while
-	 * no output has taken it since. Reads the profile and touches sources,
-	 * so UI thread and not before FINISHED_LOADING. */
+	/* Keeps the remembered track while no output sends it, or takes a free
+	 * one. Does nothing until signed in: an unconfigured plugin touches no
+	 * settings. Reads the profile and edits sources, so UI thread, after
+	 * OBS_FRONTEND_EVENT_FINISHED_LOADING. */
 	int resolve_track();
 
-	/* False while no source is ticked: the co-host hears silence, and the
-	 * panel should say so rather than imply it is listening. */
+	/* False while no source is ticked: the co-host hears silence. */
 	bool hearing_anything() const;
 
 	AudioHealth health() const;
 
 private:
 	AudioLoop() = default;
-	~AudioLoop() = default;
-
-	AudioLoop(const AudioLoop &) = delete;
-	AudioLoop &operator=(const AudioLoop &) = delete;
 
 	void run_vad();
 	void run_sender();
-
 	void enqueue(AudioSegment &&segment);
 
+	/* From a worker: the co-host stops listening until the next start(). */
+	void give_up(AudioHealth::State state);
 	void set_health(AudioHealth::State state, int retry_seconds = 0);
 
 	AudioTap tap_;
 	BackendClient client_;
-
 	std::thread vad_worker_;
 	std::thread send_worker_;
 
-	std::atomic<bool> running_{false};
-	std::atomic<bool> stop_requested_{false};
+	/* UI thread only. */
 	int track_ = -1;
 
-	/* Wakes the VAD worker when it is waiting for samples. */
-	std::mutex vad_mutex_;
+	mutable std::mutex mutex_;
 	std::condition_variable vad_cv_;
-
-	/* Newest-wins queue: five segments is already ten seconds of backlog,
-	 * and a co-host reacting to ten-second-old speech is worse than one that
-	 * missed it. */
-	static constexpr size_t kQueueLimit = 5;
-	std::mutex queue_mutex_;
 	std::condition_variable queue_cv_;
+	bool stop_ = false;
 	std::deque<AudioSegment> queue_;
-
-	mutable std::mutex health_mutex_;
 	AudioHealth::State health_ = AudioHealth::State::Idle;
 	uint64_t retry_until_ns_ = 0;
 };

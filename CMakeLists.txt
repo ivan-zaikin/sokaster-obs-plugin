@@ -66,8 +66,6 @@ target_sources(
     src/net/backend-client.hpp
     src/vision/frame-grabber.cpp
     src/vision/frame-grabber.hpp
-    src/vision/jpeg-encoder.cpp
-    src/vision/jpeg-encoder.hpp
     src/vision/source-picker.cpp
     src/vision/source-picker.hpp
     src/vision/vision-loop.cpp
@@ -80,8 +78,6 @@ target_sources(
     src/audio/silero-vad.hpp
     src/audio/vad-segmenter.cpp
     src/audio/vad-segmenter.hpp
-    src/audio/wav-encoder.cpp
-    src/audio/wav-encoder.hpp
 )
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})

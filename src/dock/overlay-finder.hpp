@@ -59,8 +59,8 @@ struct OverlayPresence {
  * and none is stale. Frontend API inside, so UI thread only. */
 OverlayPresence find_overlay(const std::string &token);
 
-/* The address of this account's overlay page: <backend>/overlay/<token>. */
-std::string overlay_url(const std::string &backend_url, const std::string &token);
+/* The address of this account's overlay page: <base_url>/overlay/<token>. */
+std::string overlay_url(const std::string &base_url, const std::string &token);
 
 /*
  * Puts the overlay into the current scene. An overlay of ours found in another
@@ -77,8 +77,5 @@ bool add_overlay_to_current_scene(const OverlayPresence &found, const std::strin
 
 /* Points the given overlay source at url. */
 bool set_overlay_url(const std::string &source_uuid, const std::string &url);
-
-/* Clears "Shutdown source when not visible" on the given overlay source. */
-bool keep_overlay_running(const std::string &source_uuid);
 
 } // namespace sokaster

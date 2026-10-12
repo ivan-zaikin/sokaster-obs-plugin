@@ -19,7 +19,6 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "source-picker.hpp"
 
 #include <obs-frontend-api.h>
-#include <obs-module.h>
 #include <plugin-support.h>
 
 #include <cstring>
@@ -27,71 +26,37 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 namespace sokaster {
 namespace {
 
-/* Everything else in a scene — overlays, alerts, cameras, browser docks — is
- * either us, or something the co-host has no business narrating. */
-const char *const kCaptureSourceIds[] = {
-	"game_capture",
-	"window_capture",
-	"monitor_capture",
-	"display_capture",
-};
-
-bool is_capture_source(const obs_source_t *source)
+/* Everything else in a scene — overlays, alerts, cameras — is either us, or
+ * something the co-host has no business narrating. */
+bool is_capture_source(obs_source_t *source)
 {
-	const char *id = obs_source_get_id(const_cast<obs_source_t *>(source));
-	if (!id)
-		return false;
+	static const char *const kCaptureIds[] = {"game_capture", "window_capture", "monitor_capture",
+						  "display_capture"};
 
-	for (const char *candidate : kCaptureSourceIds)
-		if (strcmp(id, candidate) == 0)
+	const char *id = obs_source_get_id(source);
+	for (const char *capture : kCaptureIds)
+		if (id && strcmp(id, capture) == 0)
 			return true;
-
 	return false;
 }
 
-struct Best {
-	obs_source_t *source = nullptr;
-	uint64_t area = 0;
-
-	/* Capture sources report a size only once they have produced a frame, and
-	 * this runs moments after OBS finishes loading — usually before that has
-	 * happened. Without a zero-area fallback the first launch would find
-	 * nothing at exactly the moment the streamer expects a suggestion. */
-	obs_source_t *first = nullptr;
-};
-
-bool consider_item(obs_scene_t *, obs_sceneitem_t *item, void *param)
+/* Calls f(source) for each capture source in the current scene. */
+template<typename F> void for_each_capture_source(F &&f)
 {
-	auto *best = static_cast<Best *>(param);
+	obs_source_t *scene_source = obs_frontend_get_current_scene();
+	if (!scene_source)
+		return;
 
-	obs_source_t *source = obs_sceneitem_get_source(item);
-	if (!source || !is_capture_source(source))
+	auto visit = [](obs_scene_t *, obs_sceneitem_t *item, void *param) {
+		obs_source_t *source = obs_sceneitem_get_source(item);
+		if (source && is_capture_source(source))
+			(*static_cast<F *>(param))(source);
 		return true;
+	};
 
-	if (!best->first)
-		best->first = source;
-
-	const uint64_t area = static_cast<uint64_t>(obs_source_get_width(source)) * obs_source_get_height(source);
-	if (area > best->area) {
-		best->area = area;
-		best->source = source;
-	}
-
-	return true;
-}
-
-bool collect_item(obs_scene_t *, obs_sceneitem_t *item, void *param)
-{
-	auto *out = static_cast<std::vector<CaptureSourceInfo> *>(param);
-
-	obs_source_t *source = obs_sceneitem_get_source(item);
-	if (!source || !is_capture_source(source))
-		return true;
-
-	const char *uuid = obs_source_get_uuid(source);
-	const char *name = obs_source_get_name(source);
-	out->push_back({uuid ? uuid : "", name ? name : ""});
-	return true;
+	if (obs_scene_t *scene = obs_scene_from_source(scene_source))
+		obs_scene_enum_items(scene, visit, &f);
+	obs_source_release(scene_source);
 }
 
 } // namespace
@@ -99,39 +64,30 @@ bool collect_item(obs_scene_t *, obs_sceneitem_t *item, void *param)
 std::vector<CaptureSourceInfo> list_capture_sources()
 {
 	std::vector<CaptureSourceInfo> result;
-
-	obs_source_t *scene_source = obs_frontend_get_current_scene();
-	if (!scene_source)
-		return result;
-
-	if (obs_scene_t *scene = obs_scene_from_source(scene_source))
-		obs_scene_enum_items(scene, collect_item, &result);
-
-	obs_source_release(scene_source);
+	for_each_capture_source([&result](obs_source_t *source) {
+		result.push_back({obs_source_get_uuid(source), obs_source_get_name(source)});
+	});
 	return result;
 }
 
 obs_source_t *pick_default_source()
 {
-	obs_source_t *scene_source = obs_frontend_get_current_scene();
-	if (!scene_source)
-		return nullptr;
+	obs_source_t *best = nullptr;
+	uint64_t best_area = 0;
 
-	obs_scene_t *scene = obs_scene_from_source(scene_source);
-	Best best;
-	if (scene)
-		obs_scene_enum_items(scene, consider_item, &best);
+	for_each_capture_source([&](obs_source_t *source) {
+		const uint64_t area =
+			static_cast<uint64_t>(obs_source_get_width(source)) * obs_source_get_height(source);
+		if (!best || area > best_area) {
+			obs_source_release(best);
+			best = obs_source_get_ref(source);
+			best_area = area;
+		}
+	});
 
-	/* consider_item borrows the item's reference, so take our own before the
-	 * scene goes out of scope. */
-	obs_source_t *chosen = best.source ? best.source : best.first;
-	obs_source_t *result = chosen ? obs_source_get_ref(chosen) : nullptr;
-	obs_source_release(scene_source);
-
-	if (result)
-		obs_log(LOG_INFO, "vision: default pick '%s'", obs_source_get_name(result));
-
-	return result;
+	if (best)
+		obs_log(LOG_INFO, "vision: default pick '%s'", obs_source_get_name(best));
+	return best;
 }
 
 } // namespace sokaster

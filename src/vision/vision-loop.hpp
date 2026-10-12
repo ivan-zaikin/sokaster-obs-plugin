@@ -21,27 +21,25 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "frame-grabber.hpp"
 #include "net/backend-client.hpp"
 
-#include <atomic>
-#include <cstdint>
 #include <condition_variable>
+#include <cstdint>
 #include <mutex>
+#include <string>
 #include <thread>
 
 namespace sokaster {
 
-/* What the eyes are doing, for the dock. The worker writes it every tick; the
- * UI reads a copy. */
+/* What the eyes are doing, for the dock. */
 struct VisionHealth {
 	enum class State {
 		/* Not running: OBS is not streaming, or nothing is configured. */
 		Idle,
-		/* The last frame reached the server. */
 		Sending,
 		/* The source is alive but has no picture (minimised game). */
 		Empty,
 		/* The selection was deleted or never made. */
 		NoSource,
-		/* Network or 5xx; retry_seconds says when the next attempt is. */
+		/* Network or 5xx; retry_seconds counts down to the next attempt. */
 		Retrying,
 		/* The server asked for fewer frames. */
 		RateLimited,
@@ -54,67 +52,56 @@ struct VisionHealth {
 };
 
 /*
- * The eyes: one worker thread that ticks, captures the chosen source, encodes a
- * JPEG and posts it to the backend.
- *
- * Everything expensive happens here, off both the graphics thread and the UI
- * thread. The only thing asked of OBS is a single rendered frame per tick.
+ * The eyes: a worker that captures the chosen source at the tempo the server
+ * sets, encodes a JPEG and posts it. The only thing asked of OBS is a single
+ * rendered frame per tick; everything else happens on the worker.
  */
 class VisionLoop {
 public:
 	static VisionLoop &instance();
 
-	/* No-op when unconfigured: an unconfigured plugin does no periodic work. */
+	/* UI thread. No-op when unconfigured. */
 	void start();
 
-	/* Joins the worker before returning. Safe to call when not running. */
+	/* UI thread. Joins the worker. Safe to call when not running. */
 	void stop();
 
-	bool running() const { return running_; }
+	/* stop(), plus letting go of the source and the GPU resources. On
+	 * OBS_FRONTEND_EVENT_EXIT, while the graphics thread is still alive. */
+	void shutdown();
 
 	VisionHealth health() const;
 
-	/* Restores the source from the saved UUID, or guesses one when there is
-	 * nothing saved. Frontend API inside, so call from the UI thread. */
+	/* The saved source, or a guess when there is none. UI thread, after
+	 * OBS_FRONTEND_EVENT_FINISHED_LOADING. */
 	void restore_selection();
 
-	/* Changes what the co-host looks at and remembers it. */
+	/* Changes what the co-host looks at and remembers it. UI thread. */
 	void select_source(obs_source_t *source);
-
-	FrameGrabber &grabber() { return grabber_; }
+	std::string selected_uuid() const { return grabber_.selected_uuid(); }
 
 private:
 	VisionLoop() = default;
-	~VisionLoop() = default;
-
-	VisionLoop(const VisionLoop &) = delete;
-	VisionLoop &operator=(const VisionLoop &) = delete;
 
 	void run();
-
-	/* Interruptible sleep; returns false when a stop was requested. */
-	bool wait_for(int milliseconds);
-
-	/* Pulls the tempo the backend dictates. Failure keeps the current one. */
 	void sync_tempo();
-
 	void set_health(VisionHealth::State state, int retry_ms = 0);
+
+	/* Interruptible sleep; false once a stop was requested. */
+	bool wait_ms(int ms);
+	bool stopping() const;
 
 	FrameGrabber grabber_;
 	BackendClient client_;
-
 	std::thread worker_;
-	std::atomic<bool> running_{false};
-	std::atomic<bool> stop_requested_{false};
 
-	std::mutex wait_mutex_;
-	std::condition_variable wait_cv_;
+	/* Worker-owned; the server may move it at any tick. */
+	int interval_ms_ = 0;
 
-	/* Owned by the worker; the backend may move it at any tick. */
-	int interval_ms_ = 5000;
-
-	mutable std::mutex health_mutex_;
-	VisionHealth health_;
+	mutable std::mutex mutex_;
+	std::condition_variable cv_;
+	bool stop_ = false;
+	VisionHealth::State health_ = VisionHealth::State::Idle;
 	uint64_t retry_until_ns_ = 0;
 };
 

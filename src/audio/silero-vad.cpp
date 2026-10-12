@@ -129,7 +129,6 @@ float SileroVad::predict(const float *frame)
 	std::memcpy(input_.data() + kContextSize, frame, kFrameSize * sizeof(float));
 
 	float probability = 0.0f;
-	const uint64_t started = os_gettime_ns();
 
 	try {
 		const int64_t input_shape[2] = {1, kInputSize};
@@ -168,9 +167,6 @@ float SileroVad::predict(const float *frame)
 		obs_log(LOG_WARNING, "vad: inference failed: %s", e.what());
 		return 0.0f;
 	}
-
-	inference_ns_ += os_gettime_ns() - started;
-	++predictions_;
 
 	/* The tail of this frame is the next frame's context. */
 	std::memcpy(context_.data(), frame + (kFrameSize - kContextSize), kContextSize * sizeof(float));

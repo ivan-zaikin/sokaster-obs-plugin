@@ -28,50 +28,37 @@ namespace {
 
 using Level = Readiness::Level;
 using Row = Readiness::Row;
+using Fix = Readiness::OverlayFix;
 
 QString text(const char *key)
 {
 	return QString::fromUtf8(obs_module_text(key));
 }
 
-Row row(Level level, const QString &message)
-{
-	return Row{level, message};
-}
-
-int seconds_until(uint64_t at_ns, uint64_t now_ns)
-{
-	return at_ns > now_ns ? static_cast<int>((at_ns - now_ns + 999999999ull) / 1000000000ull) : 0;
-}
-
 QString format_date(const std::string &iso)
 {
 	const QDateTime when = QDateTime::fromString(QString::fromStdString(iso), Qt::ISODateWithMs);
-	if (!when.isValid())
-		return QString();
-	return QLocale().toString(when.toLocalTime().date(), QLocale::ShortFormat);
+	return when.isValid() ? QLocale().toString(when.toLocalTime().date(), QLocale::ShortFormat) : QString();
 }
 
 Row account_row(const LocalFacts &local, const ServerState &server)
 {
 	if (!local.configured)
-		return row(Level::Block, text("Dock.Account.SignIn.Hint"));
-
+		return {Level::Block, text("Dock.Account.SignIn.Hint")};
 	if (server.link == ServerState::Link::KeyRejected)
-		return row(Level::Block, text("Dock.Account.Expired"));
-
+		return {Level::Block, text("Dock.Account.Expired")};
 	if (!server.have_beta)
-		return row(Level::Neutral, QString());
+		return {};
 
 	if (!server.admitted) {
 		if (server.beta_status == "Pending")
-			return row(Level::Block, text("Dock.Account.Pending").arg(format_date(server.requested_at)));
+			return {Level::Block, text("Dock.Account.Pending").arg(format_date(server.requested_at))};
 		if (server.beta_status == "Rejected")
-			return row(Level::Block, text("Dock.Account.Rejected"));
-		return row(Level::Block, text("Dock.Account.NoApplication"));
+			return {Level::Block, text("Dock.Account.Rejected")};
+		return {Level::Block, text("Dock.Account.NoApplication")};
 	}
 
-	return row(Level::Ok, text("Dock.Account.Ok").arg(QString::fromStdString(server.display_name)));
+	return {Level::Ok, text("Dock.Account.Ok").arg(QString::fromStdString(server.display_name))};
 }
 
 /*
@@ -79,208 +66,157 @@ Row account_row(const LocalFacts &local, const ServerState &server)
  * what will cut it off. Connected wins: if the co-host can be heard, the rest
  * is advice.
  */
-Row overlay_row(const LocalFacts &local, const ServerState &server, Readiness::OverlayFix *fix)
+Row overlay_row(const LocalFacts &local, const ServerState &server, Fix &fix)
 {
-	using Fix = Readiness::OverlayFix;
-
 	const OverlayPresence &o = local.overlay;
 	const bool known = server.have_beta && server.link == ServerState::Link::Ok;
-	*fix = Fix::None;
+	fix = Fix::None;
 
 	if (known && server.overlay_connected) {
-		/* Heard twice right now beats cut off at the next scene switch.
-		 * No button: which copy to remove is the streamer's call. */
+		/* No button for a duplicate: which copy to remove is the streamer's call. */
 		if (server.overlay_count > 1)
-			return row(Level::Warn, text("Dock.Overlay.Duplicate").arg(server.overlay_count));
-		if (o.shutdown_when_hidden) {
-			*fix = Fix::KeepRunning;
-			return row(Level::Warn, text("Dock.Overlay.Shutdown"));
-		}
+			return {Level::Warn, text("Dock.Overlay.Duplicate").arg(server.overlay_count)};
+		if (o.shutdown_when_hidden)
+			return {Level::Warn, text("Dock.Overlay.Shutdown")};
 		if (o.where == OverlayPresence::Where::OtherScene) {
-			*fix = Fix::Add;
-			return row(Level::Warn, text("Dock.Overlay.OtherScene"));
+			fix = Fix::Add;
+			return {Level::Warn, text("Dock.Overlay.OtherScene")};
 		}
-		return row(Level::Ok, text("Dock.Overlay.Ok"));
+		return {Level::Ok, text("Dock.Overlay.Ok")};
 	}
 
 	if (o.where == OverlayPresence::Where::Missing) {
-		*fix = Fix::Add;
-		return row(Level::Block, text("Dock.Overlay.Missing"));
+		fix = Fix::Add;
+		return {Level::Block, text("Dock.Overlay.Missing")};
 	}
 	if (o.stale) {
-		*fix = Fix::Update;
-		return row(Level::Block, text("Dock.Overlay.Stale"));
+		fix = Fix::Update;
+		return {Level::Block, text("Dock.Overlay.Stale")};
 	}
 	if (!known)
-		return row(Level::Neutral, QString());
+		return {};
 
-	/* Just added or re-pointed: the page takes a few seconds to load and
-	 * connect, and "not connected" in that time reads like a failure. */
-	if (local.overlay_placing)
-		return row(Level::Neutral, text("Dock.Overlay.Connecting"));
-
-	/* Present in OBS but not connected. The flag is the likeliest reason
-	 * once the stream has moved to another scene. */
-	if (o.shutdown_when_hidden && o.where == OverlayPresence::Where::OtherScene) {
-		*fix = Fix::KeepRunning;
-		return row(Level::Block, text("Dock.Overlay.Shutdown"));
-	}
-	return row(Level::Block, text("Dock.Overlay.Disconnected"));
+	/* Present but not connected. Once the stream has moved to another scene,
+	 * the flag is the likeliest reason. */
+	if (o.shutdown_when_hidden && o.where == OverlayPresence::Where::OtherScene)
+		return {Level::Block, text("Dock.Overlay.Shutdown")};
+	return {Level::Block, text("Dock.Overlay.Disconnected")};
 }
 
 Row eyes_row(const LocalFacts &local, const ServerState &server)
 {
 	if (!local.eyes_selected) {
 		if (local.no_capture_sources || local.eyes_name.isEmpty())
-			return row(Level::Block, text("Dock.Eyes.None"));
-		return row(Level::Block, text("Dock.Eyes.Gone").arg(local.eyes_name));
+			return {Level::Block, text("Dock.Eyes.None")};
+		return {Level::Block, text("Dock.Eyes.Gone").arg(local.eyes_name)};
 	}
 
-	/* Off air the worker is idle and the server expects no frames; the
-	 * selection itself is all there is to check. */
+	/* Off air nothing is captured; the selection is all there is to check. */
 	if (!local.streaming)
-		return row(Level::Ok, QString());
+		return {Level::Ok, QString()};
 
 	switch (local.vision.state) {
 	case VisionHealth::State::NoSource:
-		return row(Level::Block, text("Dock.Eyes.Gone").arg(local.eyes_name));
+		return {Level::Block, text("Dock.Eyes.Gone").arg(local.eyes_name)};
 	case VisionHealth::State::Empty:
-		return row(Level::Warn, text("Dock.Eyes.Empty").arg(local.eyes_name));
+		return {Level::Warn, text("Dock.Eyes.Empty").arg(local.eyes_name)};
 	case VisionHealth::State::Retrying:
-		return row(Level::Block, text("Dock.Eyes.Retry").arg(local.vision.retry_seconds));
+		return {Level::Block, text("Dock.Eyes.Retry").arg(local.vision.retry_seconds)};
 	case VisionHealth::State::RateLimited:
-		return row(Level::Warn, text("Dock.Eyes.Slow").arg(local.vision.retry_seconds));
+		return {Level::Warn, text("Dock.Eyes.Slow").arg(local.vision.retry_seconds)};
 	case VisionHealth::State::KeyRejected:
 		/* Said once, on the account row. */
-		return row(Level::Block, QString());
+		return {Level::Block, QString()};
 	default:
 		break;
 	}
 
-	/* The worker thinks it is fine, but the server has not seen a frame in
-	 * a while: the same thing from the other end. */
+	/* The worker thinks it is fine, but the server has not seen a frame in a
+	 * while: the same problem from the other end. */
 	if (server.link == ServerState::Link::Ok && server.run_state == "DesktopOffline")
-		return row(Level::Block, text("Dock.Eyes.NotArriving"));
-
-	return row(Level::Ok, QString());
+		return {Level::Block, text("Dock.Eyes.NotArriving")};
+	return {Level::Ok, QString()};
 }
 
 Row ears_row(const LocalFacts &local)
 {
+	if (!local.configured)
+		return {};
 	if (local.audio_track < 0)
-		return row(Level::Warn, text("Dock.Hears.NoTrack"));
+		return {Level::Warn, text("Dock.Hears.NoTrack")};
 
 	switch (local.audio.state) {
 	case AudioHealth::State::SpeechDisabled:
-		return row(Level::Warn, text("Dock.Hears.Disabled"));
+		return {Level::Warn, text("Dock.Hears.Disabled")};
 	case AudioHealth::State::VadFailed:
-		return row(Level::Warn, text("Dock.Hears.VadFailed"));
+		return {Level::Warn, text("Dock.Hears.VadFailed")};
 	case AudioHealth::State::Retrying:
-		return row(Level::Warn, text("Dock.Hears.Retry").arg(local.audio.retry_seconds));
+		return {Level::Warn, text("Dock.Hears.Retry").arg(local.audio.retry_seconds)};
 	default:
 		break;
 	}
 
 	if (!local.hearing_anything)
-		return row(Level::Warn, text("Dock.Hears.Nothing"));
-
-	return row(Level::Ok, text("Dock.Hears.Track").arg(local.audio_track + 1));
+		return {Level::Warn, text("Dock.Hears.Nothing")};
+	return {Level::Ok, text("Dock.Hears.Track").arg(local.audio_track + 1)};
 }
 
-const QueuedOrder *on_air_order(const ServerState &server)
+Row air_row(const LocalFacts &local, const ServerState &server)
 {
-	for (const QueuedOrder &order : server.orders)
-		if (order.state == "onair")
-			return &order;
-	return nullptr;
-}
-
-Row air_row(const LocalFacts &local, const ServerState &server, uint64_t now_ns, bool *offer_donate)
-{
-	*offer_donate = false;
-
 	if (!server.have_beta || server.link != ServerState::Link::Ok)
-		return row(Level::Neutral, QString());
+		return {};
 
 	const std::string &state = server.run_state;
-
 	if (state == "BudgetExhausted")
-		return row(Level::Block,
-			   text("Dock.Air.Budget").arg(server.spent_usd, 0, 'f', 2).arg(server.budget_usd, 0, 'f', 2));
-
+		return {Level::Block,
+			text("Dock.Air.Budget").arg(server.spent_usd, 0, 'f', 2).arg(server.budget_usd, 0, 'f', 2)};
+	if (server.pending_orders > 0)
+		return {Level::Warn, text("Dock.Air.Pending").arg(server.pending_orders)};
 	if (!local.streaming)
-		return row(Level::Neutral, text("Dock.Air.NotStreaming"));
-
+		return {Level::Neutral, text("Dock.Air.NotStreaming")};
 	if (state == "SessionStopped")
-		return row(Level::Warn, text("Dock.Air.Reconnecting"));
-
+		return {Level::Warn, text("Dock.Air.Reconnecting")};
 	if (state == "NoCredit")
-		return row(Level::Neutral, text("Dock.Air.NoCredit"));
-
-	if (state == "NoOrder") {
-		*offer_donate = !server.donate_url.empty();
-		return row(Level::Neutral, text("Dock.Air.NoOrder"));
-	}
-
-	if (state == "Ok") {
-		if (const QueuedOrder *order = on_air_order(server)) {
-			const int elapsed = static_cast<int>((now_ns - server.orders_received_ns) / 1000000000ull);
-			const int left = order->seconds_left > elapsed ? order->seconds_left - elapsed : 0;
-			return row(Level::Ok,
-				   text("Dock.Air.OnAir")
-					   .arg(QString::fromStdString(order->display_name), format_clock(left)));
-		}
-		return row(Level::Ok, text("Dock.Ready.OnAir"));
-	}
+		return {Level::Neutral, text("Dock.Air.NoCredit")};
+	if (state == "NoOrder")
+		return {Level::Neutral, text("Dock.Air.NoOrder")};
+	if (state == "Ok")
+		return {Level::Ok, text("Dock.Air.Talking")};
 
 	/* NotApproved, NoOverlay, DesktopOffline: said on their own rows. */
-	return row(Level::Neutral, QString());
+	return {};
 }
 
 } // namespace
 
-QString format_clock(int seconds)
-{
-	if (seconds < 0)
-		seconds = 0;
-	return QStringLiteral("%1:%2").arg(seconds / 60).arg(seconds % 60, 2, 10, QLatin1Char('0'));
-}
-
 Readiness evaluate_readiness(const LocalFacts &local, const ServerState &server, uint64_t now_ns)
 {
 	Readiness r;
-
 	r.account = account_row(local, server);
-	r.overlay = overlay_row(local, server, &r.overlay_fix);
+	r.overlay = overlay_row(local, server, r.overlay_fix);
 	r.eyes = eyes_row(local, server);
 	r.ears = ears_row(local);
-	r.air = air_row(local, server, now_ns, &r.offer_donate_link);
+	r.air = air_row(local, server);
+	r.ask_to_sign_in = !local.configured || server.link == ServerState::Link::KeyRejected;
 
-	r.ask_for_key = !local.configured || server.link == ServerState::Link::KeyRejected;
-
-	/* Air is not counted among the steps: a spent budget is not something the
-	 * streamer can set up, and the headline says it on its own. */
+	/* Air is not a setup step: a spent budget is not something to set up. */
 	int blocking = 0;
-	for (const Row *each : {&r.account, &r.overlay, &r.eyes})
-		if (each->level == Level::Block)
+	for (const Row *row : {&r.account, &r.overlay, &r.eyes})
+		if (row->level == Level::Block)
 			++blocking;
 
-	/* Rows still finding out count as not ready: an order typed while the
-	 * server has not answered yet would only bounce. */
-	const bool all_known = r.account.level == Level::Ok && r.overlay.level != Level::Neutral;
-	r.order_enabled = blocking == 0 && all_known && r.air.level != Level::Block;
-
-	if (server.link == ServerState::Link::Offline)
-		r.headline = text("Dock.Ready.Offline").arg(seconds_until(server.retry_at_ns, now_ns));
-	else if (blocking > 0)
+	if (server.link == ServerState::Link::Offline) {
+		const uint64_t left_ns = server.retry_at_ns > now_ns ? server.retry_at_ns - now_ns : 0;
+		r.headline = text("Dock.Ready.Offline").arg((left_ns + 999999999ull) / 1000000000ull);
+	} else if (blocking > 0) {
 		r.headline = text("Dock.Ready.Setup").arg(blocking);
-	else if (r.air.level == Level::Block)
+	} else if (r.air.level == Level::Block) {
 		r.headline = text("Dock.Ready.Stopped");
-	else if (server.run_state == "Ok" && local.streaming)
+	} else if (server.run_state == "Ok" && local.streaming) {
 		r.headline = text("Dock.Ready.OnAir");
-	else if (server.have_beta)
+	} else if (server.have_beta) {
 		r.headline = text("Dock.Ready.Idle");
-
+	}
 	return r;
 }
 

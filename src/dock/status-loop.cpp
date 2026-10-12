@@ -29,7 +29,6 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QUrl>
 
 #include <algorithm>
 #include <chrono>
@@ -37,69 +36,19 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 namespace sokaster {
 namespace {
 
-/* On air the queue moves: orders arrive, timers run out, a pending order has
- * three minutes for a decision. Five seconds is what the desktop polled at. */
+/* On air a pending order has minutes for a decision; off air nobody watches. */
 constexpr int kOnAirPollMs = 5000;
-
-/* Off air nobody is watching the dock, and the queue only changes when
- * someone orders. */
 constexpr int kOffAirPollMs = 30000;
-
 constexpr int kMaxBackoffMs = 60000;
 
-QJsonObject parse_object(const std::string &body)
+QJsonDocument parse(const std::string &body)
 {
-	const QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(body));
-	return doc.isObject() ? doc.object() : QJsonObject();
+	return QJsonDocument::fromJson(QByteArray::fromStdString(body));
 }
 
 std::string str(const QJsonObject &o, const char *key)
 {
 	return o.value(QLatin1String(key)).toString().toStdString();
-}
-
-int integer(const QJsonObject &o, const char *key)
-{
-	return o.value(QLatin1String(key)).toInt();
-}
-
-/* The server answers refusals as {"code", "error", ...}. A body without them
- * (a proxy's error page, an older server) leaves both empty, and the dock
- * falls back to its own words. */
-void read_refusal(const HttpResult &http, CommandResult &result)
-{
-	const QJsonObject o = parse_object(http.body);
-	result.code = str(o, "code");
-	result.error = str(o, "error");
-	result.ahead_minutes = integer(o, "aheadMinutes");
-	for (const QJsonValue &category : o.value(QLatin1String("categories")).toArray())
-		result.categories.push_back(category.toString().toStdString());
-}
-
-std::string encode_path_segment(const std::string &segment)
-{
-	return QUrl::toPercentEncoding(QString::fromStdString(segment)).toStdString();
-}
-
-QueuedOrder parse_order(const QJsonObject &o)
-{
-	QueuedOrder order;
-	order.id = str(o, "id");
-	order.state = str(o, "state");
-	order.from = str(o, "from");
-	order.prompt = str(o, "prompt");
-	order.display_name = str(o, "displayName");
-	order.risk = integer(o, "risk");
-	order.seconds_left = integer(o, "secondsLeft");
-	order.position = integer(o, "position");
-	order.wait_seconds = integer(o, "waitSeconds");
-	order.hold_seconds_left = integer(o, "holdSecondsLeft");
-	order.own = o.value(QLatin1String("own")).toBool();
-
-	for (const QJsonValue &category : o.value(QLatin1String("categories")).toArray())
-		order.categories.push_back(category.toString().toStdString());
-
-	return order;
 }
 
 } // namespace
@@ -110,48 +59,41 @@ StatusLoop &StatusLoop::instance()
 	return loop;
 }
 
-void StatusLoop::set_sinks(StateSink state_sink, CommandSink command_sink)
+void StatusLoop::start(Sink sink)
 {
-	state_sink_ = std::move(state_sink);
-	command_sink_ = std::move(command_sink);
-}
-
-void StatusLoop::start()
-{
-	if (running_)
+	if (worker_.joinable())
 		return;
 
-	stop_requested_ = false;
-	reconfigure_requested_ = true;
-	running_ = true;
+	sink_ = std::move(sink);
+	stop_ = false;
+	reconfigure_ = true;
 	worker_ = std::thread([this] { run(); });
 }
 
 void StatusLoop::stop()
 {
-	if (!running_)
+	if (!worker_.joinable())
 		return;
-
-	stop_requested_ = true;
-	client_.cancel();
-	cv_.notify_all();
-
-	if (worker_.joinable())
-		worker_.join();
 
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
-		commands_.clear();
+		stop_ = true;
 	}
-
-	running_ = false;
+	client_.cancel();
+	cv_.notify_all();
+	worker_.join();
+	sink_ = nullptr;
 }
 
 void StatusLoop::reconfigure()
 {
-	reconfigure_requested_ = true;
-	/* Whatever is on the wire was asked with the old key. */
+	/* Cancel first: whatever is on the wire was asked with the old key, and
+	 * the worker lifts the cancel when it picks up the new one. */
 	client_.cancel();
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		reconfigure_ = true;
+	}
 	cv_.notify_all();
 }
 
@@ -159,7 +101,7 @@ void StatusLoop::poke()
 {
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
-		poke_requested_ = true;
+		poke_ = true;
 	}
 	cv_.notify_all();
 }
@@ -170,172 +112,56 @@ void StatusLoop::set_streaming(bool streaming)
 	poke();
 }
 
-void StatusLoop::enqueue(std::function<void()> command)
+int StatusLoop::poll_interval_ms() const
 {
-	{
-		std::lock_guard<std::mutex> lock(mutex_);
-		commands_.push_back(std::move(command));
-	}
-	cv_.notify_all();
-}
-
-void StatusLoop::report_command(const CommandResult &result)
-{
-	if (command_sink_)
-		command_sink_(result);
-}
-
-void StatusLoop::place_order(const std::string &prompt, const std::string &voice)
-{
-	enqueue([this, prompt, voice] {
-		QJsonObject body;
-		body.insert(QLatin1String("prompt"), QString::fromStdString(prompt));
-		if (!voice.empty())
-			body.insert(QLatin1String("voice"), QString::fromStdString(voice));
-
-		const std::string json = QJsonDocument(body).toJson(QJsonDocument::Compact).toStdString();
-		const HttpResult http = client_.post_json("/api/persona/order", json);
-
-		CommandResult result;
-		result.kind = CommandResult::Kind::PlaceOrder;
-		result.status = http.status;
-		result.ok = http.ok();
-		if (http.ok()) {
-			const QJsonObject o = parse_object(http.body);
-			result.state = str(o, "state");
-			result.position = integer(o, "position");
-			result.wait_seconds = integer(o, "waitSeconds");
-		} else {
-			read_refusal(http, result);
-		}
-		report_command(result);
-	});
-}
-
-void StatusLoop::approve(const std::string &order_id)
-{
-	enqueue([this, order_id] {
-		const HttpResult http =
-			client_.post_json("/api/orders/" + encode_path_segment(order_id) + "/approve", "{}");
-
-		CommandResult result;
-		result.kind = CommandResult::Kind::Approve;
-		result.status = http.status;
-		result.ok = http.ok();
-		if (http.ok()) {
-			const QJsonObject o = parse_object(http.body);
-			result.state = str(o, "status");
-			result.position = integer(o, "position");
-			result.wait_seconds = integer(o, "waitSeconds");
-		} else {
-			read_refusal(http, result);
-		}
-		report_command(result);
-	});
-}
-
-void StatusLoop::reject(const std::string &order_id)
-{
-	enqueue([this, order_id] {
-		const HttpResult http =
-			client_.post_json("/api/orders/" + encode_path_segment(order_id) + "/reject", "{}");
-
-		CommandResult result;
-		result.kind = CommandResult::Kind::Reject;
-		result.status = http.status;
-		result.ok = http.ok();
-		if (!http.ok())
-			read_refusal(http, result);
-		report_command(result);
-	});
-}
-
-void StatusLoop::drop_on_air()
-{
-	enqueue([this] {
-		const HttpResult http = client_.del("/api/persona/donation");
-
-		CommandResult result;
-		result.kind = CommandResult::Kind::Drop;
-		result.status = http.status;
-		result.ok = http.ok();
-		if (http.ok())
-			result.dropped = parse_object(http.body).value(QLatin1String("dropped")).toBool();
-		else
-			read_refusal(http, result);
-		report_command(result);
-	});
+	const int base = streaming_ ? kOnAirPollMs : kOffAirPollMs;
+	if (state_.link != ServerState::Link::Offline)
+		return base;
+	return std::min(base << std::min(failures_ - 1, 4), kMaxBackoffMs);
 }
 
 void StatusLoop::fetch_account()
 {
 	const HttpResult me = client_.get("/api/user/me");
 	if (me.ok()) {
-		const QJsonObject o = parse_object(me.body);
+		const QJsonObject o = parse(me.body).object();
 		state_.display_name = str(o, "twitchDisplayName");
 		if (state_.display_name.empty())
 			state_.display_name = str(o, "name");
 	}
 
-	const HttpResult voices = client_.get("/api/persona/voices");
-	if (voices.ok()) {
-		state_.voices.clear();
-		const QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(voices.body));
-		for (const QJsonValue &v : doc.array()) {
-			const QJsonObject o = v.toObject();
-			state_.voices.push_back({str(o, "id"), str(o, "hint")});
-		}
-	}
-
 	const HttpResult token = client_.get("/api/overlay-token");
 	if (token.ok())
-		state_.overlay_token = str(parse_object(token.body), "token");
+		state_.overlay_token = str(parse(token.body).object(), "token");
 
-	/* Only a complete set counts: a voice list missing because the network
-	 * blinked would otherwise stay missing for the rest of the session. */
-	account_fetched_ = me.ok() && voices.ok() && token.ok();
+	account_fetched_ = me.ok() && token.ok();
 }
 
 void StatusLoop::poll()
 {
-	if (!config::get().configured()) {
-		state_ = ServerState();
-		state_.link = ServerState::Link::Unconfigured;
-		return;
-	}
-
 	if (!account_fetched_)
 		fetch_account();
 
 	const HttpResult beta = client_.get("/api/beta/me");
-	if (stop_requested_ || reconfigure_requested_)
-		return;
-
 	if (beta.status == 401 || beta.status == 403) {
-		/* A rejected key stays rejected; the dock asks for a new one. */
+		/* A rejected key stays rejected; the dock asks to sign in again. */
 		state_.link = ServerState::Link::KeyRejected;
 		account_fetched_ = false;
 		return;
 	}
 
 	if (!beta.ok()) {
-		++consecutive_failures_;
-		const int shift = std::min(consecutive_failures_ - 1, 4);
-		const int base = streaming_ ? kOnAirPollMs : kOffAirPollMs;
-		const int backoff = std::min(base << shift, kMaxBackoffMs);
-
+		++failures_;
 		state_.link = ServerState::Link::Offline;
-		state_.retry_at_ns = os_gettime_ns() + static_cast<uint64_t>(backoff) * 1000000ull;
-		state_.orders_stale = state_.have_orders;
-		obs_log(LOG_DEBUG, "status: poll failed (%ld), retry in %d ms", beta.status, backoff);
+		state_.retry_at_ns = os_gettime_ns() + static_cast<uint64_t>(poll_interval_ms()) * 1000000ull;
+		obs_log(LOG_DEBUG, "status: poll failed (%ld)", beta.status);
 		return;
 	}
 
-	consecutive_failures_ = 0;
+	failures_ = 0;
 	state_.link = ServerState::Link::Ok;
-	state_.retry_at_ns = 0;
 
-	const QJsonObject o = parse_object(beta.body);
+	const QJsonObject o = parse(beta.body).object();
 	state_.have_beta = true;
 	state_.beta_status = str(o, "status");
 	state_.requested_at = str(o, "requestedAt");
@@ -343,24 +169,16 @@ void StatusLoop::poll()
 	state_.run_state = str(o, "runState");
 	state_.budget_usd = o.value(QLatin1String("budgetUsd")).toDouble();
 	state_.spent_usd = o.value(QLatin1String("spentUsd")).toDouble();
-	state_.donate_url = str(o, "donateUrl");
 	state_.overlay_connected = o.value(QLatin1String("overlayConnected")).toBool();
-	state_.overlay_count = integer(o, "overlayCount");
+	state_.overlay_count = o.value(QLatin1String("overlayCount")).toInt();
 
+	/* A failed read keeps the last count: a blink is not "nothing pending". */
 	const HttpResult orders = client_.get("/api/orders");
 	if (orders.ok()) {
-		state_.orders.clear();
-		const QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(orders.body));
-		for (const QJsonValue &v : doc.array())
-			state_.orders.push_back(parse_order(v.toObject()));
-
-		state_.have_orders = true;
-		state_.orders_stale = false;
-		state_.orders_received_ns = os_gettime_ns();
-	} else {
-		/* The list stays as it was: "the network blinked" is not "the
-		 * queue is empty". */
-		state_.orders_stale = state_.have_orders;
+		state_.pending_orders = 0;
+		for (const QJsonValue &order : parse(orders.body).array())
+			if (order.toObject().value(QLatin1String("state")).toString() == QLatin1String("pending"))
+				++state_.pending_orders;
 	}
 }
 
@@ -368,73 +186,44 @@ void StatusLoop::run()
 {
 	os_set_thread_name("sokaster-status");
 
-	while (!stop_requested_) {
-		if (reconfigure_requested_.exchange(false)) {
+	std::unique_lock<std::mutex> lock(mutex_);
+	while (!stop_) {
+		bool configured = true;
+		if (reconfigure_) {
+			reconfigure_ = false;
 			const Config cfg = config::get();
-			client_.configure(cfg.backend_url, cfg.access_key);
+			client_.configure(cfg.base_url(), cfg.access_key);
+			configured = cfg.configured();
 			state_ = ServerState();
-			state_.link = cfg.configured() ? ServerState::Link::Connecting
-						       : ServerState::Link::Unconfigured;
 			account_fetched_ = false;
-			consecutive_failures_ = 0;
-
-			if (state_sink_)
-				state_sink_(state_);
-		}
-
-		/* Clicks first: the streamer is waiting on those, and the poll that
-		 * follows shows their effect. */
-		std::deque<std::function<void()>> commands;
-		{
-			std::lock_guard<std::mutex> lock(mutex_);
-			commands.swap(commands_);
-			poke_requested_ = false;
-		}
-
-		if (!config::get().configured()) {
-			/* Nothing to run them against. Dropped rather than kept: an
-			 * order typed before a key existed should not fire later on
-			 * its own. */
-			commands.clear();
-		}
-
-		for (auto &command : commands) {
-			if (stop_requested_)
-				break;
-			command();
-		}
-
-		if (stop_requested_)
-			break;
-
-		poll();
-
-		if (stop_requested_)
-			break;
-		if (state_sink_ && !reconfigure_requested_)
-			state_sink_(state_);
-
-		int wait_ms = streaming_ ? kOnAirPollMs : kOffAirPollMs;
-		if (state_.link == ServerState::Link::Offline) {
-			const uint64_t now = os_gettime_ns();
-			wait_ms = state_.retry_at_ns > now ? static_cast<int>((state_.retry_at_ns - now) / 1000000ull)
-							   : 0;
-		}
-
-		std::unique_lock<std::mutex> lock(mutex_);
-		const auto wake = [this] {
-			return stop_requested_ || reconfigure_requested_ || poke_requested_ || !commands_.empty();
-		};
-
-		if (state_.link == ServerState::Link::Unconfigured || state_.link == ServerState::Link::KeyRejected) {
-			/* Idle until the streamer gives us a key: an unconfigured
-			 * plugin does no periodic work. */
-			cv_.wait(lock, [this] { return stop_requested_ || reconfigure_requested_.load(); });
+			failures_ = 0;
 		} else {
-			cv_.wait_for(lock, std::chrono::milliseconds(wait_ms), wake);
+			configured = config::get().configured();
+		}
+		poke_ = false;
+
+		lock.unlock();
+		if (configured)
+			poll();
+		else
+			state_ = ServerState();
+		lock.lock();
+
+		if (stop_)
+			break;
+		if (!reconfigure_) {
+			lock.unlock();
+			sink_(state_);
+			lock.lock();
 		}
 
-		client_.clear_cancel();
+		if (!configured || state_.link == ServerState::Link::KeyRejected) {
+			/* Nothing to ask with: idle until a new key or a stop. */
+			cv_.wait(lock, [this] { return stop_ || reconfigure_; });
+		} else {
+			cv_.wait_for(lock, std::chrono::milliseconds(poll_interval_ms()),
+				     [this] { return stop_ || reconfigure_ || poke_; });
+		}
 	}
 }
 

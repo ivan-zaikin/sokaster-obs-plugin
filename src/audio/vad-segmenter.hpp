@@ -27,45 +27,36 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 namespace sokaster {
 
-/* One utterance, already encoded and ready to post. */
+/* One utterance, encoded as 16-bit mono WAV and ready to post. */
 struct AudioSegment {
 	std::vector<uint8_t> wav;
 	int duration_ms = 0;
-	/* When the speech started, ISO-8601 UTC — the backend orders the
+	/* When the speech started, ISO-8601 UTC: the server orders the
 	 * transcript by this, not by arrival. */
 	std::string captured_at;
 };
 
 /*
- * Turns a stream of samples into utterances.
- *
- * Silero answers per 32 ms window; this is the state machine around it that
- * decides where a sentence begins and ends. The numbers are the ones the
- * desktop client arrived at over a few months of real streams, carried over
- * unchanged — they are tuned against people talking over game audio, and
- * nothing about moving into OBS changes that.
+ * Turns a stream of 16 kHz samples into utterances: the state machine around
+ * Silero's per-window verdicts that decides where a sentence begins and ends.
+ * The numbers are tuned against people talking over game audio.
  */
 class VadSegmenter {
 public:
-	static constexpr int kSampleRate = 16000;
-	static constexpr int kVadFrameSamples = SileroVad::kFrameSize; /* 32 ms */
-
 	static constexpr int kPreRollMs = 200;    /* keeps the attack of the first word */
 	static constexpr int kPostRollMs = 100;   /* keeps the transcriber from clipping the last one */
 	static constexpr int kMinSegmentMs = 500; /* shorter than this is a cough */
 	static constexpr int kMaxSegmentMs = 12000;
 	static constexpr int kSilenceCloseMs = 600;
-	static constexpr int kVoiceEnterFrames = 3; /* about 96 ms above the threshold */
-	static constexpr int kWindowMs = 32;
+	static constexpr int kVoiceEnterWindows = 3; /* about 96 ms above the threshold */
 
 	/* Hysteresis: harder to start speaking than to keep speaking, so a pause
 	 * mid-sentence does not cut the sentence in two. */
 	static constexpr float kEnterThreshold = 0.5f;
 	static constexpr float kExitThreshold = 0.35f;
 
-	/* A long enough silence resets the LSTM. Left alone, the state can drift
-	 * into a corner where the model answers ~0.0025 to loud speech and stays
-	 * there. Found the hard way on a live stream. */
+	/* A long silence resets the LSTM: left alone, its state can drift into a
+	 * corner where it answers ~0.0025 to loud speech and stays there. */
 	static constexpr int kResetAfterSilentWindows = 30;
 	static constexpr float kSilentWindowPeak = 0.005f;
 
@@ -73,16 +64,8 @@ public:
 
 	VadSegmenter(SileroVad &vad, SegmentHandler on_segment);
 
-	/* Takes any number of samples; windowing is internal. Called from the
-	 * audio worker only. */
+	/* Any number of samples; windowing is internal. */
 	void push(const float *samples, size_t count);
-
-	/* Closes an open segment, e.g. when the stream ends. */
-	void flush();
-
-	/* Drops everything in flight without emitting: the co-host stopped
-	 * listening, so half an utterance is not worth sending. */
-	void discard();
 
 private:
 	void process_probability(float probability);
@@ -92,7 +75,7 @@ private:
 	SileroVad &vad_;
 	SegmentHandler on_segment_;
 
-	/* The 512-sample window under construction. */
+	/* The window under construction. */
 	std::vector<float> window_;
 
 	/* Pre-roll ring, always written, read only when speech starts. */

@@ -18,28 +18,31 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "frame-grabber.hpp"
 
-#include <obs-module.h>
 #include <plugin-support.h>
 #include <graphics/vec4.h>
 #include <util/platform.h>
 
 #include <algorithm>
+#include <cstring>
 
 namespace sokaster {
 namespace {
 
-/* What matters is not the absolute cost but the share of a frame interval it
- * takes: at 60 fps the graphics thread has 16.7 ms, and measured on a 1280x720
- * readback this work costs 1-2 ms once per capture interval. Five milliseconds
- * is where it starts being a real share of somebody's frame, so that is where
- * the log speaks up. */
+/* At 60 fps the graphics thread has 16.7 ms per frame; a 1280x720 readback
+ * measures 1-2 ms. Past 5 ms it is a real share of someone's frame. */
 constexpr uint64_t kGraphicsBudgetNs = 5 * 1000 * 1000;
 
-/* Some sources report odd sizes; JPEG does not care, but keeping the target
- * even avoids surprises in chroma subsampling downstream. */
+/* Some sources report odd sizes; an even target avoids chroma surprises. */
 uint32_t round_even(uint32_t value)
 {
 	return value < 2 ? 2 : value & ~1u;
+}
+
+void warn_if_over_budget(const char *stage, uint64_t started_ns)
+{
+	const uint64_t elapsed = os_gettime_ns() - started_ns;
+	if (elapsed > kGraphicsBudgetNs)
+		obs_log(LOG_WARNING, "vision: %s took %.2f ms on the graphics thread", stage, elapsed / 1000000.0);
 }
 
 } // namespace
@@ -52,68 +55,26 @@ struct FrameGrabber::RenderTask {
 	uint32_t out_width;
 	uint32_t out_height;
 	Frame *out;
-	Status status;
-
-	/* Set by the staging pass so the mapping pass knows the texture is on its
-	 * way down from the GPU. */
 	bool staged;
+	bool mapped;
 };
-
-FrameGrabber::~FrameGrabber()
-{
-	select(nullptr);
-	shutdown();
-}
 
 void FrameGrabber::select(obs_source_t *source)
 {
-	obs_weak_source_t *previous_weak = nullptr;
-	bool release_previous_showing = false;
+	const bool was_active = active_;
+	set_active(false);
 
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
-		previous_weak = weak_source_;
-		release_previous_showing = showing_;
-
+		obs_weak_source_release(weak_source_);
 		weak_source_ = source ? obs_source_get_weak_source(source) : nullptr;
 		uuid_ = source ? obs_source_get_uuid(source) : "";
-		showing_ = false;
 	}
 
-	/* Balance the previous selection outside the lock: dec_showing runs source
-	 * signal handlers, and holding our mutex through foreign code invites the
-	 * kind of deadlock that only shows up on someone else's machine. */
-	if (previous_weak) {
-		if (release_previous_showing) {
-			obs_source_t *previous = obs_weak_source_get_source(previous_weak);
-			if (previous) {
-				obs_source_dec_showing(previous);
-				obs_source_release(previous);
-			}
-		}
-		obs_weak_source_release(previous_weak);
-	}
+	if (source)
+		obs_log(LOG_INFO, "vision: watching '%s'", obs_source_get_name(source));
 
-	if (!source)
-		return;
-
-	/* A capture source sitting in a scene that is not on air produces nothing
-	 * at all. The streamer picked it, so we ask OBS to keep it running rather
-	 * than silently shipping black frames. */
-	obs_source_inc_showing(source);
-
-	{
-		std::lock_guard<std::mutex> lock(mutex_);
-		showing_ = true;
-	}
-
-	obs_log(LOG_INFO, "vision: watching '%s'", obs_source_get_name(source));
-}
-
-bool FrameGrabber::has_selection() const
-{
-	std::lock_guard<std::mutex> lock(mutex_);
-	return weak_source_ != nullptr;
+	set_active(was_active);
 }
 
 std::string FrameGrabber::selected_uuid() const
@@ -122,49 +83,46 @@ std::string FrameGrabber::selected_uuid() const
 	return uuid_;
 }
 
-std::string FrameGrabber::selected_name() const
+obs_source_t *FrameGrabber::source() const
 {
-	obs_weak_source_t *weak = nullptr;
-	{
-		std::lock_guard<std::mutex> lock(mutex_);
-		if (!weak_source_)
-			return {};
-		weak = weak_source_;
-		obs_weak_source_addref(weak);
-	}
+	std::lock_guard<std::mutex> lock(mutex_);
+	return weak_source_ ? obs_weak_source_get_source(weak_source_) : nullptr;
+}
 
-	std::string name;
-	if (obs_source_t *source = obs_weak_source_get_source(weak)) {
-		const char *value = obs_source_get_name(source);
-		name = value ? value : "";
-		obs_source_release(source);
+void FrameGrabber::set_active(bool active)
+{
+	if (active == active_)
+		return;
+	active_ = active;
+
+	/* inc/dec_showing run source signal handlers, so never under our mutex. */
+	if (active) {
+		if (obs_source_t *s = source()) {
+			obs_source_inc_showing(s);
+			shown_ = obs_source_get_weak_source(s);
+			obs_source_release(s);
+		}
+	} else if (shown_) {
+		if (obs_source_t *s = obs_weak_source_get_source(shown_)) {
+			obs_source_dec_showing(s);
+			obs_source_release(s);
+		}
+		obs_weak_source_release(shown_);
+		shown_ = nullptr;
 	}
-	obs_weak_source_release(weak);
-	return name;
 }
 
 FrameGrabber::Status FrameGrabber::grab(uint32_t max_width, uint32_t max_height, Frame &out)
 {
-	obs_weak_source_t *weak = nullptr;
-	{
-		std::lock_guard<std::mutex> lock(mutex_);
-		if (!weak_source_)
-			return Status::NoSource;
-		weak = weak_source_;
-		obs_weak_source_addref(weak);
-	}
+	obs_source_t *s = source();
+	if (!s)
+		return Status::NoSource;
 
-	obs_source_t *source = obs_weak_source_get_source(weak);
-	obs_weak_source_release(weak);
-	if (!source)
-		return Status::SourceGone;
-
-	/* Asked every tick on purpose: a streamer can change the game's resolution
-	 * mid-broadcast, and a stale size would stretch or crop the frame. */
-	const uint32_t src_width = obs_source_get_width(source);
-	const uint32_t src_height = obs_source_get_height(source);
+	/* Asked every time: a game's resolution can change mid-stream. */
+	const uint32_t src_width = obs_source_get_width(s);
+	const uint32_t src_height = obs_source_get_height(s);
 	if (src_width == 0 || src_height == 0) {
-		obs_source_release(source);
+		obs_source_release(s);
 		return Status::NotReady;
 	}
 
@@ -173,152 +131,113 @@ FrameGrabber::Status FrameGrabber::grab(uint32_t max_width, uint32_t max_height,
 
 	RenderTask task{};
 	task.self = this;
-	task.source = source;
+	task.source = s;
 	task.src_width = src_width;
 	task.src_height = src_height;
 	task.out_width = round_even(static_cast<uint32_t>(src_width * scale));
 	task.out_height = round_even(static_cast<uint32_t>(src_height * scale));
 	task.out = &out;
-	task.status = Status::RenderFailed;
 
-	/* Blocking on purpose: this runs on the vision worker, never on a thread
-	 * OBS needs, and it keeps the frame's lifetime trivially correct.
-	 *
-	 * Two passes, one frame apart: the second is queued only after the first
-	 * has returned, so it lands on the graphics thread's next turn and the
-	 * readback has had a frame to finish. */
-	obs_queue_task(OBS_TASK_GRAPHICS, stage_on_graphics_thread, &task, true);
+	/* Two blocking passes on the graphics thread, the second queued only
+	 * after the first returned: the readback gets a frame to finish instead of
+	 * stalling the GPU, and that stall would be a dropped frame. */
+	obs_queue_task(OBS_TASK_GRAPHICS, stage, &task, true);
 	if (task.staged)
-		obs_queue_task(OBS_TASK_GRAPHICS, map_on_graphics_thread, &task, true);
+		obs_queue_task(OBS_TASK_GRAPHICS, map, &task, true);
 
-	obs_source_release(source);
-	return task.status;
+	obs_source_release(s);
+	return task.mapped ? Status::Ok : Status::NotReady;
 }
 
-/*
- * libobs runs the graphics task queue on the graphics thread but outside
- * gs_enter_context, so every gs_* call would otherwise find no active context
- * and quietly do nothing. Entering is cheap and reentrant on the thread that
- * already owns the device.
- */
-void FrameGrabber::stage_on_graphics_thread(void *param)
+/* Graphics tasks run on the graphics thread but outside gs_enter_context, so
+ * both passes enter it themselves; that is cheap on the owning thread. */
+void FrameGrabber::stage(void *param)
 {
 	auto *task = static_cast<RenderTask *>(param);
-	const uint64_t started = os_gettime_ns();
-
-	obs_enter_graphics();
-	render_with_context(task);
-	obs_leave_graphics();
-
-	warn_if_over_budget("stage", os_gettime_ns() - started);
-}
-
-void FrameGrabber::map_on_graphics_thread(void *param)
-{
-	auto *task = static_cast<RenderTask *>(param);
-	const uint64_t started = os_gettime_ns();
-
-	obs_enter_graphics();
-	map_with_context(task);
-	obs_leave_graphics();
-
-	warn_if_over_budget("readback", os_gettime_ns() - started);
-}
-
-void FrameGrabber::warn_if_over_budget(const char *stage, uint64_t elapsed_ns)
-{
-	if (elapsed_ns > kGraphicsBudgetNs)
-		obs_log(LOG_WARNING, "vision: %s took %.2f ms on the graphics thread", stage, elapsed_ns / 1000000.0);
-}
-
-void FrameGrabber::render_with_context(RenderTask *task)
-{
 	FrameGrabber *self = task->self;
+	const uint64_t started = os_gettime_ns();
+
+	obs_enter_graphics();
 
 	if (!self->texrender_)
 		self->texrender_ = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
-	if (!self->texrender_)
-		return;
-
 	gs_texrender_reset(self->texrender_);
-	if (!gs_texrender_begin(self->texrender_, task->out_width, task->out_height))
-		return;
 
-	struct vec4 clear_color;
-	vec4_zero(&clear_color);
-	gs_clear(GS_CLEAR_COLOR, &clear_color, 0.0f, 0);
+	if (self->texrender_ && gs_texrender_begin(self->texrender_, task->out_width, task->out_height)) {
+		struct vec4 clear_color;
+		vec4_zero(&clear_color);
+		gs_clear(GS_CLEAR_COLOR, &clear_color, 0.0f, 0);
 
-	/* The viewport is the scaled size and the projection is the source size,
-	 * so the downscale happens on the GPU during the draw. */
-	gs_ortho(0.0f, static_cast<float>(task->src_width), 0.0f, static_cast<float>(task->src_height), -100.0f,
-		 100.0f);
+		/* Viewport at the scaled size, projection at the source size: the
+		 * downscale happens during the draw. */
+		gs_ortho(0.0f, static_cast<float>(task->src_width), 0.0f, static_cast<float>(task->src_height), -100.0f,
+			 100.0f);
 
-	gs_blend_state_push();
-	gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
-	obs_source_video_render(task->source);
-	gs_blend_state_pop();
+		gs_blend_state_push();
+		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+		obs_source_video_render(task->source);
+		gs_blend_state_pop();
+		gs_texrender_end(self->texrender_);
 
-	gs_texrender_end(self->texrender_);
-
-	if (self->staged_width_ != task->out_width || self->staged_height_ != task->out_height) {
-		if (self->stagesurf_)
-			gs_stagesurface_destroy(self->stagesurf_);
-		self->stagesurf_ = gs_stagesurface_create(task->out_width, task->out_height, GS_BGRA);
-		self->staged_width_ = task->out_width;
-		self->staged_height_ = task->out_height;
+		if (self->staged_width_ != task->out_width || self->staged_height_ != task->out_height) {
+			if (self->stagesurf_)
+				gs_stagesurface_destroy(self->stagesurf_);
+			self->stagesurf_ = gs_stagesurface_create(task->out_width, task->out_height, GS_BGRA);
+			self->staged_width_ = self->stagesurf_ ? task->out_width : 0;
+			self->staged_height_ = self->stagesurf_ ? task->out_height : 0;
+		}
+		if (self->stagesurf_) {
+			gs_stage_texture(self->stagesurf_, gs_texrender_get_texture(self->texrender_));
+			task->staged = true;
+		}
 	}
-	if (!self->stagesurf_) {
-		self->staged_width_ = self->staged_height_ = 0;
-		return;
-	}
 
-	/* Copy down from the GPU is started here and read in the next pass:
-	 * mapping straight after staging stalls the graphics thread until the GPU
-	 * catches up, and that stall is a dropped frame for the streamer. */
-	gs_stage_texture(self->stagesurf_, gs_texrender_get_texture(self->texrender_));
-	task->staged = true;
+	obs_leave_graphics();
+	warn_if_over_budget("stage", started);
 }
 
-void FrameGrabber::map_with_context(RenderTask *task)
+void FrameGrabber::map(void *param)
 {
+	auto *task = static_cast<RenderTask *>(param);
 	FrameGrabber *self = task->self;
-	if (!self->stagesurf_)
-		return;
+	const uint64_t started = os_gettime_ns();
+
+	obs_enter_graphics();
 
 	uint8_t *mapped = nullptr;
 	uint32_t linesize = 0;
-	if (!gs_stagesurface_map(self->stagesurf_, &mapped, &linesize))
-		return;
+	if (self->stagesurf_ && gs_stagesurface_map(self->stagesurf_, &mapped, &linesize)) {
+		Frame &out = *task->out;
+		const size_t row_bytes = static_cast<size_t>(task->out_width) * 4;
+		out.width = task->out_width;
+		out.height = task->out_height;
+		out.data.resize(row_bytes * task->out_height);
 
-	Frame &out = *task->out;
-	out.width = task->out_width;
-	out.height = task->out_height;
-	out.data.resize(static_cast<size_t>(task->out_width) * task->out_height * 4);
+		for (uint32_t row = 0; row < task->out_height; ++row)
+			memcpy(out.data.data() + row * row_bytes, mapped + static_cast<size_t>(row) * linesize,
+			       row_bytes);
 
-	const size_t row_bytes = static_cast<size_t>(task->out_width) * 4;
-	for (uint32_t row = 0; row < task->out_height; ++row)
-		memcpy(out.data.data() + row * row_bytes, mapped + static_cast<size_t>(row) * linesize, row_bytes);
+		gs_stagesurface_unmap(self->stagesurf_);
+		task->mapped = true;
+	}
 
-	gs_stagesurface_unmap(self->stagesurf_);
-	task->status = Status::Ok;
+	obs_leave_graphics();
+	warn_if_over_budget("readback", started);
 }
 
-void FrameGrabber::shutdown()
+void FrameGrabber::release_gpu()
 {
 	if (!texrender_ && !stagesurf_)
 		return;
 
 	obs_enter_graphics();
-	if (stagesurf_) {
+	if (stagesurf_)
 		gs_stagesurface_destroy(stagesurf_);
-		stagesurf_ = nullptr;
-	}
-	if (texrender_) {
-		gs_texrender_destroy(texrender_);
-		texrender_ = nullptr;
-	}
+	gs_texrender_destroy(texrender_);
 	obs_leave_graphics();
 
+	stagesurf_ = nullptr;
+	texrender_ = nullptr;
 	staged_width_ = staged_height_ = 0;
 }
 

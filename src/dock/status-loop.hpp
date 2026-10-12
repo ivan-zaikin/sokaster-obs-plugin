@@ -23,198 +23,102 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
-#include <deque>
 #include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
-#include <vector>
 
 namespace sokaster {
 
-/* One row of GET /api/orders. Field names follow the server's OrderDto. */
-struct QueuedOrder {
-	std::string id;
-	/* "onair", "queued" or "pending". */
-	std::string state;
-	std::string from;
-	/* The viewer's raw text. Shown only while the streamer has to decide on
-	 * it; it never goes on air as written. */
-	std::string prompt;
-	std::string display_name;
-	int risk = 0;
-	std::vector<std::string> categories;
-	int seconds_left = 0;
-	int position = 0;
-	int wait_seconds = 0;
-	int hold_seconds_left = 0;
-	bool own = false;
-};
-
-struct VoiceOption {
-	std::string id;
-	/* Server-side hint, Russian only for now. */
-	std::string hint;
-};
-
 /*
- * Everything the dock knows from the server, as of one poll.
- *
- * Failed requests keep the previous values and say so in `link` and
- * `orders_stale`: a network blip must not read as "your queue is empty".
+ * Everything the dock knows from the server, as of one poll. A failed poll
+ * keeps the previous values and says so in `link`.
  */
 struct ServerState {
 	enum class Link {
-		/* No key configured, so nothing was asked. */
-		Unconfigured,
-		/* Asked, nothing answered yet. */
-		Connecting,
+		/* Not asked yet, or no key to ask with. */
+		Unknown,
 		Ok,
 		/* Network or 5xx; retry_at_ns says when the next poll is. */
 		Offline,
 		KeyRejected,
 	};
 
-	Link link = Link::Unconfigured;
-	/* os_gettime_ns() of the next attempt while Offline, so the dock can
-	 * count it down instead of showing a frozen number. */
+	Link link = Link::Unknown;
+	/* os_gettime_ns() of the next attempt while Offline. */
 	uint64_t retry_at_ns = 0;
 
-	/* GET /api/user/me. */
+	/* GET /api/user/me and /api/overlay-token, once per key. */
 	std::string display_name;
+	std::string overlay_token;
 
-	/* GET /api/beta/me — have_beta is false until the first answer. */
+	/* GET /api/beta/me; have_beta is false until the first answer. */
 	bool have_beta = false;
 	/* "None", "Pending", "Approved", "Rejected". */
 	std::string beta_status;
 	std::string requested_at;
 	bool admitted = false;
-	/* IRunGate.Evaluate as a string: "Ok", "NoOrder", "NoOverlay", ... */
+	/* The server's RunState: "Ok", "NoOrder", "NoOverlay", ... */
 	std::string run_state;
 	double budget_usd = 0;
 	double spent_usd = 0;
-	std::string donate_url;
 	bool overlay_connected = false;
-	/* More than one: every open overlay plays the voice, so viewers hear
-	 * the co-host twice. */
+	/* More than one: every open overlay plays the voice. */
 	int overlay_count = 0;
 
-	/* GET /api/orders. */
-	bool have_orders = false;
-	bool orders_stale = false;
-	std::vector<QueuedOrder> orders;
-
-	std::vector<VoiceOption> voices;
-
-	/* GET /api/overlay-token: tells our overlay from a stale one. */
-	std::string overlay_token;
-
-	/* os_gettime_ns() when the orders were read, so the dock can count
-	 * their timers down between polls. */
-	uint64_t orders_received_ns = 0;
-};
-
-/* The outcome of something the streamer clicked. */
-struct CommandResult {
-	enum class Kind { PlaceOrder, Approve, Reject, Drop };
-
-	Kind kind = Kind::PlaceOrder;
-	bool ok = false;
-	/* 0 when the server never answered. */
-	long status = 0;
-	/* Why the server said no. The code is the contract and the dock words
-	 * it in the streamer's language; the "error" text is the server's own
-	 * Russian sentence, kept for codes this build does not know. */
-	std::string code;
-	std::string error;
-	/* air_full: how far ahead the co-host is already booked. */
-	int ahead_minutes = 0;
-	/* blocked: what the order was turned down for. */
-	std::vector<std::string> categories;
-
-	/* PlaceOrder and Approve: where the order landed. */
-	std::string state;
-	int position = 0;
-	int wait_seconds = 0;
-	bool dropped = false;
+	/* GET /api/orders: viewer orders waiting for the streamer's decision,
+	 * which happens in the dashboard. */
+	int pending_orders = 0;
 };
 
 /*
- * The dock's link to the server: a worker that polls the status and the queue
- * and runs whatever the streamer clicks, so the Qt thread never waits on the
- * network.
- *
- * Results go out through two sinks set by the dock. They are called on the
- * worker thread; the dock is responsible for hopping to the UI thread.
+ * Polls the server for the dock on a worker of its own, so the UI thread never
+ * waits on the network: every few seconds on air, rarely off air, never
+ * without a key.
  */
 class StatusLoop {
 public:
-	using StateSink = std::function<void(const ServerState &)>;
-	using CommandSink = std::function<void(const CommandResult &)>;
+	/* Called on the worker; must only post to the UI thread. */
+	using Sink = std::function<void(const ServerState &)>;
 
 	static StatusLoop &instance();
 
-	/* Sinks must be set before start() and stay valid until stop(). */
-	void set_sinks(StateSink state_sink, CommandSink command_sink);
-
-	/* Starts the worker. With no key it reports Unconfigured once and does
-	 * no periodic work, as an unconfigured plugin must. */
-	void start();
+	void start(Sink sink);
 
 	/* Joins the worker. Safe to call when not running. */
 	void stop();
 
-	/* The key or server changed: forget who we were and ask again. */
+	/* The key changed: forget the account and ask again. */
 	void reconfigure();
 
-	/* Poll now rather than at the next tick: after a click, or when OBS
-	 * starts or stops streaming. */
+	/* Poll now rather than at the next tick. */
 	void poke();
 
-	/* Polls every few seconds on air, rarely off air: between streams the
-	 * queue only changes when someone orders, and nobody is watching it. */
 	void set_streaming(bool streaming);
-
-	void place_order(const std::string &prompt, const std::string &voice);
-	void approve(const std::string &order_id);
-	void reject(const std::string &order_id);
-	void drop_on_air();
 
 private:
 	StatusLoop() = default;
-	~StatusLoop() = default;
-
-	StatusLoop(const StatusLoop &) = delete;
-	StatusLoop &operator=(const StatusLoop &) = delete;
 
 	void run();
 	void poll();
-	void enqueue(std::function<void()> command);
-	void report_command(const CommandResult &result);
-
-	/* Fetches once per account: who we are, the voices, the overlay token. */
 	void fetch_account();
+	int poll_interval_ms() const;
 
 	BackendClient client_;
-
 	std::thread worker_;
-	std::atomic<bool> running_{false};
-	std::atomic<bool> stop_requested_{false};
-	std::atomic<bool> reconfigure_requested_{false};
+	Sink sink_;
 	std::atomic<bool> streaming_{false};
 
 	std::mutex mutex_;
 	std::condition_variable cv_;
-	std::deque<std::function<void()>> commands_;
-	bool poke_requested_ = false;
+	bool stop_ = false;
+	bool reconfigure_ = false;
+	bool poke_ = false;
 
-	/* Worker-owned from here down. */
+	/* Worker-owned. */
 	ServerState state_;
 	bool account_fetched_ = false;
-	int consecutive_failures_ = 0;
-
-	StateSink state_sink_;
-	CommandSink command_sink_;
+	int failures_ = 0;
 };
 
 } // namespace sokaster

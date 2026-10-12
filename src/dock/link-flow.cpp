@@ -18,9 +18,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "link-flow.hpp"
 
-#include <obs-module.h>
+#include <obs.h>
 #include <plugin-support.h>
 #include <util/platform.h>
+#include <util/threading.h>
 
 #include <QByteArray>
 #include <QJsonDocument>
@@ -30,7 +31,6 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <chrono>
 
 namespace sokaster {
-
 namespace {
 
 /* Used when the server does not say: it waits for a human to press a button. */
@@ -39,8 +39,7 @@ constexpr int kDefaultLifetimeSeconds = 600;
 
 QJsonObject parse_object(const std::string &body)
 {
-	const QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(body));
-	return doc.isObject() ? doc.object() : QJsonObject();
+	return QJsonDocument::fromJson(QByteArray::fromStdString(body)).object();
 }
 
 std::string str(const QJsonObject &o, const char *key)
@@ -56,11 +55,6 @@ LinkFlow &LinkFlow::instance()
 	return flow;
 }
 
-LinkFlow::~LinkFlow()
-{
-	cancel();
-}
-
 void LinkFlow::set_sink(Sink sink)
 {
 	std::lock_guard<std::mutex> lock(mutex_);
@@ -71,9 +65,12 @@ void LinkFlow::start(const std::string &base_url)
 {
 	cancel();
 
-	cancelled_ = false;
-	client_.clear_cancel();
-	active_ = true;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		cancelled_ = false;
+	}
+	/* Keyless: the account is what this is about to find out. */
+	client_.configure(base_url, std::string());
 	worker_ = std::thread([this, base_url] { run(base_url); });
 }
 
@@ -83,54 +80,39 @@ void LinkFlow::cancel()
 		std::lock_guard<std::mutex> lock(mutex_);
 		cancelled_ = true;
 	}
-	cv_.notify_all();
 	client_.cancel();
+	cv_.notify_all();
 
 	if (worker_.joinable())
 		worker_.join();
-	active_ = false;
 }
 
-void LinkFlow::notify(const LinkEvent &event)
+void LinkFlow::notify(LinkEvent::Kind kind, const std::string &user_code, const std::string &url,
+		      const std::string &access_key)
 {
 	std::lock_guard<std::mutex> lock(mutex_);
 	if (sink_ && !cancelled_)
-		sink_(event);
+		sink_(LinkEvent{kind, user_code, url, access_key});
 }
 
 bool LinkFlow::wait_ms(int ms)
 {
 	std::unique_lock<std::mutex> lock(mutex_);
-	cv_.wait_for(lock, std::chrono::milliseconds(ms), [this] { return cancelled_.load(); });
-	return !cancelled_;
+	return !cv_.wait_for(lock, std::chrono::milliseconds(ms), [this] { return cancelled_; });
 }
 
-void LinkFlow::run(std::string base_url)
+void LinkFlow::run(const std::string &base_url)
 {
-	client_.configure(base_url, std::string());
+	os_set_thread_name("sokaster-link");
+	obs_log(LOG_INFO, "link: signing in through %s", base_url.c_str());
 
-	LinkEvent failed;
-	failed.kind = LinkEvent::Kind::Failed;
-
-	const HttpResult started = client_.post_json("/api/link/start", "{}");
-	if (!started.ok()) {
-		if (!cancelled_)
-			obs_log(LOG_WARNING, "link: start refused (%ld)", started.status);
-		notify(failed);
-		active_ = false;
-		return;
-	}
-
+	const HttpResult started = client_.post_json("/api/link/start");
 	const QJsonObject s = parse_object(started.body);
 	const std::string device_code = str(s, "deviceCode");
-	LinkEvent code;
-	code.kind = LinkEvent::Kind::Code;
-	code.user_code = str(s, "userCode");
-	code.url = str(s, "verificationUrlComplete");
-	if (device_code.empty() || code.user_code.empty()) {
-		obs_log(LOG_WARNING, "link: start answered without a code");
-		notify(failed);
-		active_ = false;
+	const std::string user_code = str(s, "userCode");
+	if (!started.ok() || device_code.empty() || user_code.empty()) {
+		obs_log(LOG_WARNING, "link: start refused (%ld)", started.status);
+		notify(LinkEvent::Kind::Failed);
 		return;
 	}
 
@@ -139,20 +121,16 @@ void LinkFlow::run(std::string base_url)
 		std::max(interval, s.value(QLatin1String("expiresInSeconds")).toInt(kDefaultLifetimeSeconds));
 	const uint64_t deadline = os_gettime_ns() + static_cast<uint64_t>(lifetime) * 1000000000ull;
 
-	obs_log(LOG_INFO, "link: waiting for the streamer to confirm in the browser");
-	notify(code);
+	notify(LinkEvent::Kind::Code, user_code, str(s, "verificationUrlComplete"));
 
 	QJsonObject body;
 	body.insert(QLatin1String("deviceCode"), QString::fromStdString(device_code));
 	const std::string poll_json = QJsonDocument(body).toJson(QJsonDocument::Compact).toStdString();
 
-	while (wait_ms(interval * 1000)) {
-		if (os_gettime_ns() >= deadline)
-			break;
-
+	while (wait_ms(interval * 1000) && os_gettime_ns() < deadline) {
 		const HttpResult poll = client_.post_json("/api/link/poll", poll_json);
-		/* A blink of the network is not an answer; the code is still good
-		 * until the deadline. */
+		/* A blink of the network is not an answer; the code is good until
+		 * the deadline. */
 		if (!poll.ok())
 			continue;
 
@@ -161,33 +139,19 @@ void LinkFlow::run(std::string base_url)
 		if (status == "pending")
 			continue;
 
-		if (status == "approved") {
-			LinkEvent done;
-			done.kind = LinkEvent::Kind::Done;
-			done.access_key = str(p, "accessKey");
-			if (!done.access_key.empty()) {
-				obs_log(LOG_INFO, "link: signed in");
-				notify(done);
-				active_ = false;
-				return;
-			}
-		} else if (status == "denied") {
-			obs_log(LOG_INFO, "link: the streamer declined in the browser");
-			LinkEvent denied;
-			denied.kind = LinkEvent::Kind::Denied;
-			notify(denied);
-			active_ = false;
+		const std::string key = str(p, "accessKey");
+		if (status == "approved" && !key.empty()) {
+			obs_log(LOG_INFO, "link: signed in");
+			notify(LinkEvent::Kind::Done, {}, {}, key);
 			return;
 		}
 
-		/* "expired", or an approval without a key: either way, start over. */
+		/* "denied", "expired", or an approval without a key. */
+		obs_log(LOG_INFO, "link: sign-in ended: %s", status.c_str());
 		break;
 	}
 
-	if (!cancelled_)
-		obs_log(LOG_INFO, "link: the code ran out");
-	notify(failed);
-	active_ = false;
+	notify(LinkEvent::Kind::Failed);
 }
 
 } // namespace sokaster

@@ -20,7 +20,6 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "net/backend-client.hpp"
 
-#include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
@@ -36,9 +35,7 @@ struct LinkEvent {
 		Code,
 		/* The streamer confirmed on the site; access_key is theirs. */
 		Done,
-		/* The streamer pressed "That wasn't me". */
-		Denied,
-		/* The code ran out, or the server refused to start. */
+		/* Declined in the browser, expired, or the server refused. */
 		Failed,
 	};
 
@@ -49,23 +46,20 @@ struct LinkEvent {
 };
 
 /*
- * Signing the plugin in through the sokaster site.
+ * Signing the plugin in through the sokaster site, device-code style.
  *
- * The plugin asks for a code, the streamer opens /link in the browser where
- * Twitch already knows them, checks the code against the one in the dock and
- * confirms; the plugin then collects its key. No Twitch token passes through
- * OBS and nothing is copied by hand: Twitch only ever talks to the site.
- *
- * The exchange runs on a thread of its own with its own connection, keyless:
- * the status loop knocks with the old key, and this has none yet.
+ * The plugin asks for a code, the streamer opens the site where Twitch already
+ * knows them, checks the code against the one in the dock and confirms; the
+ * plugin then collects its key. No Twitch token passes through OBS and nothing
+ * is copied by hand.
  */
 class LinkFlow {
 public:
+	/* Called on the worker; must only post to the UI thread. */
 	using Sink = std::function<void(const LinkEvent &)>;
 
 	static LinkFlow &instance();
 
-	/* Called on the worker thread; must only post to the UI. */
 	void set_sink(Sink sink);
 
 	/* Starts a new sign-in, dropping one already under way. */
@@ -74,25 +68,22 @@ public:
 	/* Stops waiting. Returns once the worker is gone. */
 	void cancel();
 
-	bool active() const { return active_; }
-
 private:
 	LinkFlow() = default;
-	~LinkFlow();
 
-	void run(std::string base_url);
-	void notify(const LinkEvent &event);
+	void run(const std::string &base_url);
+	void notify(LinkEvent::Kind kind, const std::string &user_code = {}, const std::string &url = {},
+		    const std::string &access_key = {});
 
 	/* Sleeps unless cancelled; false once cancelled. */
 	bool wait_ms(int ms);
 
 	BackendClient client_;
 	std::thread worker_;
-	std::atomic<bool> active_{false};
-	std::atomic<bool> cancelled_{false};
 
 	std::mutex mutex_;
 	std::condition_variable cv_;
+	bool cancelled_ = false;
 	Sink sink_;
 };
 

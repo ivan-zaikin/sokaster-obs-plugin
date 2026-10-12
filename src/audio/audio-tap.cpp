@@ -97,13 +97,6 @@ size_t SampleRing::read(float *dst, size_t count)
 	return count;
 }
 
-size_t SampleRing::available() const
-{
-	const uint64_t write_pos = write_pos_.load(std::memory_order_acquire);
-	const uint64_t read_pos = read_pos_.load(std::memory_order_relaxed);
-	return static_cast<size_t>(write_pos - read_pos);
-}
-
 void SampleRing::clear()
 {
 	read_pos_.store(write_pos_.load(std::memory_order_acquire), std::memory_order_release);
@@ -128,15 +121,10 @@ void AudioTap::on_audio(void *param, size_t, struct audio_data *data)
 	tap->ring_.write(reinterpret_cast<const float *>(data->data[0]), data->frames);
 }
 
-bool AudioTap::start(size_t mix_index)
+void AudioTap::start(size_t mix_index)
 {
 	if (running_)
-		return true;
-
-	if (mix_index >= MAX_AUDIO_MIXES) {
-		obs_log(LOG_ERROR, "audio: track index %zu out of range", mix_index);
-		return false;
-	}
+		return;
 
 	ring_.clear();
 
@@ -152,7 +140,6 @@ bool AudioTap::start(size_t mix_index)
 	running_ = true;
 
 	obs_log(LOG_INFO, "audio: listening on track %zu at %u Hz mono", mix_index + 1, kListenSampleRate);
-	return true;
 }
 
 void AudioTap::stop()

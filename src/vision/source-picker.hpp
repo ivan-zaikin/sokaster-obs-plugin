@@ -31,18 +31,15 @@ struct CaptureSourceInfo {
 };
 
 /* Every game, window and display capture in the current scene, in scene
- * order — what the "Watches" list offers. Frontend API, UI thread only. */
+ * order: what the "Watches" list offers. Frontend API, UI thread only. */
 std::vector<CaptureSourceInfo> list_capture_sources();
 
 /*
- * Picks the source the co-host most likely should be watching: the largest
- * game, window or display capture in the current scene.
+ * A guess at what the co-host should watch: the largest capture in the current
+ * scene, or the first one while none has a size yet (captures report one only
+ * after their first frame). The streamer confirms or changes it in the dock.
  *
- * A guess, not a decision — the streamer confirms or changes it in the dock
- * (step 5 of the reference scenario). Returns a strong reference the caller
- * releases, or nullptr when the scene holds nothing worth watching.
- *
- * Uses the frontend API, so call it from the UI thread.
+ * Returns a strong reference the caller releases, or nullptr. UI thread only.
  */
 obs_source_t *pick_default_source();
 

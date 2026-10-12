@@ -154,31 +154,12 @@ OverlayPresence find_overlay(const std::string &token)
 	return result;
 }
 
-std::string overlay_url(const std::string &backend_url, const std::string &token)
+std::string overlay_url(const std::string &base_url, const std::string &token)
 {
-	std::string base = backend_url;
-	while (!base.empty() && base.back() == '/')
-		base.pop_back();
-	return base + kOverlayPath + token;
+	return base_url + kOverlayPath + token;
 }
 
 namespace {
-
-/* Writes the given settings into a source by UUID; the browser source reloads
- * the page by itself when its URL changes. */
-bool update_source(const std::string &uuid, obs_data_t *changes)
-{
-	if (uuid.empty())
-		return false;
-
-	obs_source_t *source = obs_get_source_by_uuid(uuid.c_str());
-	if (!source)
-		return false;
-
-	obs_source_update(source, changes);
-	obs_source_release(source);
-	return true;
-}
 
 /* OBS keeps source names unique in its own dialogs; so do we, or the streamer
  * is left with two identical lines in the source list. */
@@ -275,26 +256,19 @@ bool add_overlay_to_current_scene(const OverlayPresence &found, const std::strin
 
 bool set_overlay_url(const std::string &source_uuid, const std::string &url)
 {
+	obs_source_t *source = source_uuid.empty() ? nullptr : obs_get_source_by_uuid(source_uuid.c_str());
+	if (!source)
+		return false;
+
+	/* The browser source reloads the page by itself when its URL changes. */
 	obs_data_t *changes = obs_data_create();
 	obs_data_set_string(changes, "url", url.c_str());
-	const bool ok = update_source(source_uuid, changes);
+	obs_source_update(source, changes);
 	obs_data_release(changes);
+	obs_source_release(source);
 
-	if (ok)
-		obs_log(LOG_INFO, "overlay: address updated");
-	return ok;
-}
-
-bool keep_overlay_running(const std::string &source_uuid)
-{
-	obs_data_t *changes = obs_data_create();
-	obs_data_set_bool(changes, "shutdown", false);
-	const bool ok = update_source(source_uuid, changes);
-	obs_data_release(changes);
-
-	if (ok)
-		obs_log(LOG_INFO, "overlay: shutdown-when-hidden cleared");
-	return ok;
+	obs_log(LOG_INFO, "overlay: address updated");
+	return true;
 }
 
 } // namespace sokaster

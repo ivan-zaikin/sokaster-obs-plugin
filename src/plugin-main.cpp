@@ -56,6 +56,15 @@ static void refresh_dock()
 		QMetaObject::invokeMethod(dock_widget, "refreshSources", Qt::QueuedConnection);
 }
 
+/* Idempotent: EXIT does it, and unload repeats it for a run without a frontend. */
+static void shutdown_workers()
+{
+	sokaster::LinkFlow::instance().cancel();
+	sokaster::StatusLoop::instance().stop();
+	sokaster::AudioLoop::instance().stop();
+	sokaster::VisionLoop::instance().shutdown();
+}
+
 /*
  * The co-host works while the stream works.
  *
@@ -104,12 +113,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 		/* Last moment at which the graphics thread and Qt are both still
 		 * alive. A thread that outlives this is a crash on the way out —
 		 * the most visible kind of failure there is. */
-		sokaster::LinkFlow::instance().cancel();
-		sokaster::StatusLoop::instance().stop();
-		sokaster::VisionLoop::instance().stop();
-		sokaster::AudioLoop::instance().stop();
-		sokaster::VisionLoop::instance().grabber().select(nullptr);
-		sokaster::VisionLoop::instance().grabber().shutdown();
+		shutdown_workers();
 		break;
 
 	default:
@@ -146,8 +150,7 @@ void obs_module_post_load(void)
 			return;
 		}
 
-		/* OBS takes ownership: it wraps the widget in a QDockWidget.
-		 * We keep no reference of our own and never delete it. */
+		/* OBS takes ownership: it wraps the widget in a QDockWidget. */
 		auto *dock = new SokasterDock();
 		dock_registered =
 			obs_frontend_add_dock_by_id(SokasterDock::kDockId, obs_module_text("Dock.Title"), dock);
@@ -173,12 +176,7 @@ void obs_module_post_load(void)
 
 void obs_module_unload(void)
 {
-	/* Normally already done by OBS_FRONTEND_EVENT_EXIT; repeated here because
-	 * a module can also be unloaded without the frontend ever running. */
-	sokaster::LinkFlow::instance().cancel();
-	sokaster::StatusLoop::instance().stop();
-	sokaster::VisionLoop::instance().stop();
-	sokaster::AudioLoop::instance().stop();
+	shutdown_workers();
 
 	if (frontend_callback_added) {
 		obs_frontend_remove_event_callback(on_frontend_event, nullptr);
@@ -191,6 +189,6 @@ void obs_module_unload(void)
 		dock_widget = nullptr;
 	}
 
-	sokaster::BackendClient::global_cleanup();
+	/* No curl_global_cleanup: it is not safe while other modules use curl. */
 	obs_log(LOG_INFO, "sokaster unloaded");
 }

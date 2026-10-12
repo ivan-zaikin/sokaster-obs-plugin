@@ -48,7 +48,6 @@ public:
 	void write(const float *src, size_t count);
 	size_t read(float *dst, size_t count);
 
-	size_t available() const;
 	uint64_t dropped_samples() const { return dropped_; }
 	void clear();
 
@@ -79,20 +78,16 @@ public:
 	AudioTap(const AudioTap &) = delete;
 	AudioTap &operator=(const AudioTap &) = delete;
 
-	bool start(size_t mix_index);
+	void start(size_t mix_index);
 	void stop();
 
-	bool running() const { return running_; }
-	size_t mix_index() const { return mix_index_; }
-
 	size_t read(float *dst, size_t count) { return ring_.read(dst, count); }
-	uint64_t dropped_samples() const { return ring_.dropped_samples(); }
 
 private:
 	static void on_audio(void *param, size_t mix_idx, struct audio_data *data);
 
 	SampleRing ring_;
-	std::atomic<bool> running_{false};
+	bool running_ = false;
 	size_t mix_index_ = 0;
 };
 

@@ -18,11 +18,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "vad-segmenter.hpp"
 
-#include "wav-encoder.hpp"
-
 #include <obs.h>
 #include <plugin-support.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -31,8 +30,16 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 namespace sokaster {
 namespace {
 
-/* ISO-8601 UTC, milliseconds, trailing Z — what the backend's DateTime parser
- * has been fed since the desktop client. */
+constexpr int kSampleRate = SileroVad::kSampleRate;
+constexpr int kWindow = SileroVad::kFrameSize;
+constexpr int kWindowMs = kWindow * 1000 / kSampleRate;
+
+int samples_to_ms(size_t samples)
+{
+	return static_cast<int>(samples * 1000 / kSampleRate);
+}
+
+/* ISO-8601 UTC with milliseconds and a trailing Z. */
 std::string iso8601_utc(int offset_ms)
 {
 	const auto now = std::chrono::system_clock::now() + std::chrono::milliseconds(offset_ms);
@@ -47,9 +54,8 @@ std::string iso8601_utc(int offset_ms)
 	gmtime_r(&secs, &utc);
 #endif
 
-	/* The calendar part goes through strftime rather than one snprintf of
-	 * seven ints: -Werror=format-truncation reasons about the whole int range
-	 * and does not know gmtime already bounded these fields. */
+	/* strftime rather than one snprintf of seven ints: -Wformat-truncation
+	 * does not know gmtime already bounded the fields. */
 	char stamp[24];
 	if (std::strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%S", &utc) == 0)
 		return {};
@@ -59,16 +65,48 @@ std::string iso8601_utc(int offset_ms)
 	return buffer;
 }
 
-int samples_to_ms(size_t samples)
+/* Mono 16-bit PCM in a 44-byte RIFF header, written byte by byte: RIFF is
+ * little-endian whatever the machine underneath. */
+std::vector<uint8_t> encode_wav(const std::vector<float> &samples)
 {
-	return static_cast<int>((samples * 1000) / VadSegmenter::kSampleRate);
+	const uint32_t data_size = static_cast<uint32_t>(samples.size()) * 2;
+	std::vector<uint8_t> out;
+	out.reserve(44 + data_size);
+
+	const auto put = [&out](uint32_t value, int bytes) {
+		for (int i = 0; i < bytes; ++i)
+			out.push_back(static_cast<uint8_t>((value >> (8 * i)) & 0xff));
+	};
+	const auto tag = [&out](const char *name) {
+		out.insert(out.end(), name, name + 4);
+	};
+
+	tag("RIFF");
+	put(36 + data_size, 4);
+	tag("WAVE");
+	tag("fmt ");
+	put(16, 4);              /* fmt chunk size */
+	put(1, 2);               /* PCM */
+	put(1, 2);               /* mono */
+	put(kSampleRate, 4);     /* sample rate */
+	put(kSampleRate * 2, 4); /* byte rate */
+	put(2, 2);               /* block align */
+	put(16, 2);              /* bits per sample */
+	tag("data");
+	put(data_size, 4);
+
+	/* Hard clip: past unity is already distorted, wrapping would be noise. */
+	for (float sample : samples)
+		put(static_cast<uint16_t>(static_cast<int16_t>(std::clamp(sample, -1.0f, 1.0f) * 32767.0f)), 2);
+
+	return out;
 }
 
 } // namespace
 
 VadSegmenter::VadSegmenter(SileroVad &vad, SegmentHandler on_segment) : vad_(vad), on_segment_(std::move(on_segment))
 {
-	window_.reserve(kVadFrameSamples);
+	window_.reserve(kWindow);
 	pre_roll_.assign(static_cast<size_t>(kSampleRate) * kPreRollMs / 1000, 0.0f);
 	segment_.reserve(static_cast<size_t>(kSampleRate) * 4);
 }
@@ -78,37 +116,28 @@ void VadSegmenter::push(const float *samples, size_t count)
 	for (size_t i = 0; i < count; ++i) {
 		const float sample = samples[i];
 
-		/* The pre-roll ring is written unconditionally, so that when speech
-		 * does start we already have the 200 ms before it. */
 		pre_roll_[pre_roll_head_] = sample;
 		pre_roll_head_ = (pre_roll_head_ + 1) % pre_roll_.size();
-		if (pre_roll_filled_ < pre_roll_.size())
-			++pre_roll_filled_;
+		pre_roll_filled_ = std::min(pre_roll_filled_ + 1, pre_roll_.size());
 
 		if (speaking_)
 			segment_.push_back(sample);
 
 		window_.push_back(sample);
-		if (window_.size() < static_cast<size_t>(kVadFrameSamples))
+		if (window_.size() < static_cast<size_t>(kWindow))
 			continue;
 
 		float peak = 0.0f;
-		for (float value : window_) {
-			const float magnitude = std::fabs(value);
-			if (magnitude > peak)
-				peak = magnitude;
-		}
+		for (float value : window_)
+			peak = std::max(peak, std::fabs(value));
 
-		if (peak < kSilentWindowPeak) {
-			if (++silent_windows_ == kResetAfterSilentWindows)
-				vad_.reset();
-		} else {
+		if (peak >= kSilentWindowPeak)
 			silent_windows_ = 0;
-		}
+		else if (++silent_windows_ == kResetAfterSilentWindows)
+			vad_.reset();
 
 		const float probability = vad_.predict(window_.data());
 		window_.clear();
-
 		process_probability(probability);
 	}
 }
@@ -116,27 +145,22 @@ void VadSegmenter::push(const float *samples, size_t count)
 void VadSegmenter::process_probability(float probability)
 {
 	if (!speaking_) {
-		if (probability >= kEnterThreshold) {
-			if (++consecutive_voice_ >= kVoiceEnterFrames)
-				start_segment();
-		} else {
+		if (probability < kEnterThreshold)
 			consecutive_voice_ = 0;
-		}
+		else if (++consecutive_voice_ >= kVoiceEnterWindows)
+			start_segment();
 		return;
 	}
 
-	if (probability < kExitThreshold) {
-		silence_ms_ += kWindowMs;
-		if (silence_ms_ >= kSilenceCloseMs) {
-			close_segment("silence");
-			return;
-		}
-	} else {
+	if (probability >= kExitThreshold) {
 		silence_ms_ = 0;
+	} else if ((silence_ms_ += kWindowMs) >= kSilenceCloseMs) {
+		close_segment("silence");
+		return;
 	}
 
-	/* A monologue still has to reach the transcriber in pieces, or the first
-	 * word of an answer waits for the last word of the question. */
+	/* A monologue still reaches the transcriber in pieces, or the first word
+	 * of an answer waits for the last word of the question. */
 	if (samples_to_ms(segment_.size()) >= kMaxSegmentMs)
 		close_segment("force-cut");
 }
@@ -148,15 +172,13 @@ void VadSegmenter::start_segment()
 	silence_ms_ = 0;
 	segment_.clear();
 
-	/* Pour the ring out oldest first. */
-	if (pre_roll_filled_ > 0) {
-		const size_t start = (pre_roll_head_ + pre_roll_.size() - pre_roll_filled_) % pre_roll_.size();
-		for (size_t i = 0; i < pre_roll_filled_; ++i)
-			segment_.push_back(pre_roll_[(start + i) % pre_roll_.size()]);
-	}
+	/* The pre-roll, oldest first: the segment starts where it starts, not
+	 * where the model finally agreed there was speech. */
+	const size_t size = pre_roll_.size();
+	const size_t start = (pre_roll_head_ + size - pre_roll_filled_) % size;
+	for (size_t i = 0; i < pre_roll_filled_; ++i)
+		segment_.push_back(pre_roll_[(start + i) % size]);
 
-	/* The segment starts where the pre-roll starts, not where the model
-	 * finally agreed there was speech. */
 	segment_started_at_ = iso8601_utc(-kPreRollMs);
 }
 
@@ -166,54 +188,20 @@ void VadSegmenter::close_segment(const char *reason)
 	consecutive_voice_ = 0;
 	silence_ms_ = 0;
 
-	if (segment_.empty())
-		return;
+	/* Whatever was said is over; its state only makes the next start harder
+	 * to detect. */
+	vad_.reset();
 
-	/* A little silence on the end: transcribers routinely eat the last
-	 * consonant of a segment that stops dead. */
+	/* A little silence on the end: transcribers eat the last consonant of a
+	 * segment that stops dead. */
 	segment_.insert(segment_.end(), static_cast<size_t>(kSampleRate) * kPostRollMs / 1000, 0.0f);
-
 	const int duration_ms = samples_to_ms(segment_.size());
 
-	/* Whatever was said before is over; carrying the state into the next
-	 * silence only makes the next start harder to detect. */
-	vad_.reset();
-
-	if (duration_ms < kMinSegmentMs) {
-		obs_log(LOG_DEBUG, "vad: dropped a %d ms blip (%s)", duration_ms, reason);
-		segment_.clear();
-		return;
+	if (duration_ms >= kMinSegmentMs) {
+		obs_log(LOG_DEBUG, "vad: segment %d ms (%s)", duration_ms, reason);
+		on_segment_(AudioSegment{encode_wav(segment_), duration_ms, segment_started_at_});
 	}
-
-	AudioSegment out;
-	out.duration_ms = duration_ms;
-	out.captured_at = segment_started_at_;
-	encode_wav_pcm16(segment_, kSampleRate, out.wav);
 	segment_.clear();
-
-	obs_log(LOG_DEBUG, "vad: segment %d ms, %zu kB (%s)", duration_ms, out.wav.size() / 1024, reason);
-
-	if (on_segment_)
-		on_segment_(std::move(out));
-}
-
-void VadSegmenter::flush()
-{
-	if (speaking_)
-		close_segment("flush");
-}
-
-void VadSegmenter::discard()
-{
-	speaking_ = false;
-	consecutive_voice_ = 0;
-	silence_ms_ = 0;
-	silent_windows_ = 0;
-	segment_.clear();
-	window_.clear();
-	pre_roll_head_ = 0;
-	pre_roll_filled_ = 0;
-	vad_.reset();
 }
 
 } // namespace sokaster

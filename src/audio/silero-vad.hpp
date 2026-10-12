@@ -58,19 +58,12 @@ public:
 	 * a plugin that cannot hear, not a plugin that takes OBS down with it. */
 	bool load(const std::string &model_path);
 
-	bool loaded() const { return impl_ != nullptr; }
-
 	/* Clears state and context. Wanted on pauses and at segment boundaries. */
 	void reset();
 
 	/* Takes exactly kFrameSize samples, returns the speech probability.
 	 * Returns 0 when the model is not loaded or inference failed. */
 	float predict(const float *frame);
-
-	/* Inference cost, counted here rather than by the caller: only this
-	 * function knows how many windows actually reached the model. */
-	uint64_t predictions() const { return predictions_; }
-	uint64_t inference_ns() const { return inference_ns_; }
 
 private:
 	struct Impl;
@@ -79,9 +72,6 @@ private:
 	std::array<float, kStateSize> state_{};
 	std::array<float, kContextSize> context_{};
 	std::array<float, kInputSize> input_{};
-
-	uint64_t predictions_ = 0;
-	uint64_t inference_ns_ = 0;
 };
 
 /* Absolute path to the bundled model, or an empty string when the plugin's

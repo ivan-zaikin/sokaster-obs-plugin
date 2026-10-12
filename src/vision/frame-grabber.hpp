@@ -37,69 +37,68 @@ struct Frame {
 /*
  * Captures a single source on demand.
  *
- * Not obs_add_raw_video_callback: that hands us every frame at the canvas rate,
- * and at one frame per few seconds it would throw away 99.99% of the work. Here
- * the graphics thread is asked for one frame only when a frame is wanted.
+ * Not obs_add_raw_video_callback: that hands over every frame at the canvas
+ * rate, and at one frame per few seconds nearly all of that work would be
+ * thrown away. Here the graphics thread renders one frame only when asked.
  *
- * The selected source is held weakly. A strong reference would keep a source
- * the streamer deleted alive and stall the scene it belonged to.
+ * The selected source is held weakly: a strong reference would keep a source
+ * the streamer deleted alive.
  */
 class FrameGrabber {
 public:
 	enum class Status {
 		Ok,
-		/* Nothing selected yet. */
+		/* Nothing selected, or the selection was deleted. */
 		NoSource,
-		/* The selection was deleted, or its UUID no longer resolves. */
-		SourceGone,
-		/* Alive but has no picture right now: zero size. */
+		/* Alive but without a picture right now: zero size, or the graphics
+		 * thread could not render it. */
 		NotReady,
-		/* The graphics thread refused: lost device, surface allocation. */
-		RenderFailed,
 	};
 
 	FrameGrabber() = default;
-	~FrameGrabber();
 
 	FrameGrabber(const FrameGrabber &) = delete;
 	FrameGrabber &operator=(const FrameGrabber &) = delete;
 
-	/* Takes a weak reference; pass nullptr to clear the selection. */
+	/* UI thread. nullptr clears the selection. */
 	void select(obs_source_t *source);
-
-	bool has_selection() const;
 	std::string selected_uuid() const;
-	std::string selected_name() const;
 
-	/* Downscales to fit within max_width x max_height, on the GPU, for free.
-	 * Blocks until the graphics thread has run the capture. */
+	/*
+	 * UI thread. While active, the selection is held "showing", so a capture
+	 * that is not in the program scene keeps producing frames. Only while
+	 * capturing: an idle plugin must not keep a game hooked.
+	 */
+	void set_active(bool active);
+
+	/* Worker thread. Downscales on the GPU to fit max_width x max_height and
+	 * blocks until the graphics thread has run the capture. */
 	Status grab(uint32_t max_width, uint32_t max_height, Frame &out);
 
 	/* Frees GPU resources. Must run while the graphics subsystem is alive. */
-	void shutdown();
+	void release_gpu();
 
 private:
 	struct RenderTask;
-	static void stage_on_graphics_thread(void *param);
-	static void map_on_graphics_thread(void *param);
-	static void render_with_context(RenderTask *task);
-	static void map_with_context(RenderTask *task);
-	static void warn_if_over_budget(const char *stage, uint64_t elapsed_ns);
+	static void stage(void *param);
+	static void map(void *param);
+
+	/* A strong reference to the selection, or nullptr. */
+	obs_source_t *source() const;
 
 	mutable std::mutex mutex_;
 	obs_weak_source_t *weak_source_ = nullptr;
 	std::string uuid_;
 
-	/* Touched only from the graphics thread, or from shutdown() under the
-	 * graphics context. */
+	/* UI thread only. */
+	bool active_ = false;
+	obs_weak_source_t *shown_ = nullptr;
+
+	/* Graphics thread only, or release_gpu() under the graphics context. */
 	gs_texrender_t *texrender_ = nullptr;
 	gs_stagesurf_t *stagesurf_ = nullptr;
 	uint32_t staged_width_ = 0;
 	uint32_t staged_height_ = 0;
-
-	/* True while a source is held visible on our behalf, so the balancing
-	 * dec_showing happens exactly once. */
-	bool showing_ = false;
 };
 
 } // namespace sokaster

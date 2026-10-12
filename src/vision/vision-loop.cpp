@@ -18,36 +18,60 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "vision-loop.hpp"
 
-#include "jpeg-encoder.hpp"
 #include "source-picker.hpp"
 #include "plugin-config.hpp"
 
-#include <obs-module.h>
 #include <plugin-support.h>
 #include <util/platform.h>
 #include <util/threading.h>
 
+#include <QBuffer>
+#include <QImage>
+
 #include <algorithm>
+#include <chrono>
 
 namespace sokaster {
 namespace {
 
-/* Failures back off from the normal tempo up to a minute: a backend that is
- * down stays down for a while, and a plugin that keeps knocking every five
- * seconds is a plugin that shows up in someone's firewall log. */
-constexpr int kMaxBackoffMs = 60000;
+constexpr uint32_t kMaxWidth = 1280;
+constexpr uint32_t kMaxHeight = 720;
+constexpr int kJpegQuality = 80;
 
-/* A 429 means the server has already told us the rate; the desktop client
- * settled on half a minute and nothing suggests a better number. */
+/* Until the server names the tempo, and the bounds on what it may name. */
+constexpr int kDefaultIntervalMs = 5000;
+constexpr int kMinIntervalMs = 1000;
+constexpr int kMaxIntervalMs = 600000;
+
+/* Failures back off from the tempo up to a minute; a 429 waits half a minute. */
+constexpr int kMaxBackoffMs = 60000;
 constexpr int kRateLimitBackoffMs = 30000;
 
-/* Roughly a minute of normal ticks between tempo checks. The tempo is set by
- * an admin and changes rarely, so polling it hard buys nothing. */
-constexpr int kTicksBetweenTempoSync = 12;
+/* The tempo is set by an admin and changes rarely: re-read it about once a
+ * minute rather than every frame. */
+constexpr int kFramesBetweenTempoSync = 12;
 
-int clamp_interval(int value, int fallback)
+constexpr long kUploadTimeoutSeconds = 30;
+/* Sent while OBS may be closing: a silent server must not hold up the exit. */
+constexpr long kSessionStopTimeoutSeconds = 3;
+
+/* Qt's encoder: obs-deps carries no libjpeg, and Qt is linked for the dock
+ * anyway. Format_RGB32 on a little-endian machine is exactly the BGRA byte
+ * order libobs staged; JPEG drops the alpha. */
+bool encode_jpeg(const Frame &frame, std::vector<uint8_t> &out)
 {
-	return (value >= 1000 && value <= 600000) ? value : fallback;
+	const QImage image(frame.data.data(), static_cast<int>(frame.width), static_cast<int>(frame.height),
+			   static_cast<qsizetype>(frame.width) * 4, QImage::Format_RGB32);
+
+	QByteArray encoded;
+	QBuffer buffer(&encoded);
+	if (image.isNull() || !buffer.open(QIODevice::WriteOnly) || !image.save(&buffer, "JPEG", kJpegQuality)) {
+		obs_log(LOG_WARNING, "vision: jpeg encode failed");
+		return false;
+	}
+
+	out.assign(encoded.constData(), encoded.constData() + encoded.size());
+	return true;
 }
 
 } // namespace
@@ -60,52 +84,57 @@ VisionLoop &VisionLoop::instance()
 
 void VisionLoop::start()
 {
-	if (running_)
+	if (worker_.joinable())
 		return;
 
 	const Config cfg = config::get();
-	if (!cfg.configured()) {
-		obs_log(LOG_INFO, "vision: not configured, staying idle");
+	if (!cfg.configured())
 		return;
+
+	client_.configure(cfg.base_url(), cfg.access_key);
+	interval_ms_ = kDefaultIntervalMs;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		stop_ = false;
 	}
 
-	client_.configure(cfg.backend_url, cfg.access_key);
-	interval_ms_ = cfg.vision_interval_ms;
-
-	stop_requested_ = false;
-	running_ = true;
+	grabber_.set_active(true);
 	worker_ = std::thread([this] { run(); });
 }
 
 void VisionLoop::stop()
 {
-	if (!running_)
+	if (!worker_.joinable())
 		return;
 
-	stop_requested_ = true;
-
-	/* Abort whatever is on the wire, then wake the sleeping tick. Without the
-	 * first, shutdown could sit through a 30 second upload timeout. */
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		stop_ = true;
+	}
+	/* Abort the upload on the wire too, or the stop waits out its timeout. */
 	client_.cancel();
-	wait_cv_.notify_all();
+	cv_.notify_all();
+	worker_.join();
 
-	if (worker_.joinable())
-		worker_.join();
-
-	running_ = false;
+	grabber_.set_active(false);
 	set_health(VisionHealth::State::Idle);
-	obs_log(LOG_INFO, "vision: stopped");
+}
+
+void VisionLoop::shutdown()
+{
+	stop();
+	grabber_.select(nullptr);
+	grabber_.release_gpu();
 }
 
 VisionHealth VisionLoop::health() const
 {
-	std::lock_guard<std::mutex> lock(health_mutex_);
-	VisionHealth result = health_;
-
-	/* Counted down at read time, so the dock's "retrying in N s" moves on
-	 * its own between ticks instead of freezing at the first value. Rounded
-	 * up: "in 0 s" while a wait is still running reads as a bug. */
+	std::lock_guard<std::mutex> lock(mutex_);
 	const uint64_t now = os_gettime_ns();
+
+	VisionHealth result;
+	result.state = health_;
+	/* Counted down at read time and rounded up: "in 0 s" reads as a bug. */
 	result.retry_seconds =
 		retry_until_ns_ > now ? static_cast<int>((retry_until_ns_ - now + 999999999ull) / 1000000000ull) : 0;
 	return result;
@@ -113,167 +142,126 @@ VisionHealth VisionLoop::health() const
 
 void VisionLoop::set_health(VisionHealth::State state, int retry_ms)
 {
-	std::lock_guard<std::mutex> lock(health_mutex_);
-	health_.state = state;
+	std::lock_guard<std::mutex> lock(mutex_);
+	health_ = state;
 	retry_until_ns_ = retry_ms > 0 ? os_gettime_ns() + static_cast<uint64_t>(retry_ms) * 1000000ull : 0;
 }
 
-bool VisionLoop::wait_for(int milliseconds)
+bool VisionLoop::stopping() const
 {
-	std::unique_lock<std::mutex> lock(wait_mutex_);
-	wait_cv_.wait_for(lock, std::chrono::milliseconds(milliseconds), [this] { return stop_requested_.load(); });
-	return !stop_requested_;
+	std::lock_guard<std::mutex> lock(mutex_);
+	return stop_;
+}
+
+bool VisionLoop::wait_ms(int ms)
+{
+	std::unique_lock<std::mutex> lock(mutex_);
+	return !cv_.wait_for(lock, std::chrono::milliseconds(ms), [this] { return stop_; });
 }
 
 void VisionLoop::sync_tempo()
 {
-	const HttpResult result = client_.get_settings();
+	const HttpResult result = client_.get("/api/user/me/settings");
 	if (!result.ok())
 		return;
 
 	obs_data_t *data = obs_data_create_from_json(result.body.c_str());
-	if (!data) {
-		obs_log(LOG_WARNING, "vision: settings response was not JSON");
-		return;
-	}
-
-	/* ASP.NET serialises camelCase; the PascalCase fallback costs one line and
-	 * survives a serialiser setting changing under us. */
-	long long interval = obs_data_get_int(data, "effectiveVisionIntervalMs");
-	if (interval == 0)
-		interval = obs_data_get_int(data, "EffectiveVisionIntervalMs");
+	const long long interval = data ? obs_data_get_int(data, "effectiveVisionIntervalMs") : 0;
 	obs_data_release(data);
 
-	const int next = clamp_interval(static_cast<int>(interval), interval_ms_);
-	if (next != interval_ms_) {
-		obs_log(LOG_INFO, "vision: tempo %d ms -> %d ms", interval_ms_, next);
-		interval_ms_ = next;
+	if (interval >= kMinIntervalMs && interval <= kMaxIntervalMs && interval != interval_ms_) {
+		obs_log(LOG_INFO, "vision: tempo %d ms -> %lld ms", interval_ms_, interval);
+		interval_ms_ = static_cast<int>(interval);
 	}
 }
 
 void VisionLoop::run()
 {
 	os_set_thread_name("sokaster-vision");
-	obs_log(LOG_INFO, "vision: started, tempo %d ms", interval_ms_);
+	obs_log(LOG_INFO, "vision: started");
 
-	client_.post_session_start();
+	client_.post_json("/api/session/start");
 	sync_tempo();
 
 	Frame frame;
 	std::vector<uint8_t> jpeg;
-	int consecutive_failures = 0;
-	int ticks_since_tempo_sync = 0;
-	uint64_t frame_number = 0;
+	int failures = 0;
+	uint64_t frames = 0;
 
-	while (!stop_requested_) {
-		const Config cfg = config::get();
-		const uint64_t tick_started = os_gettime_ns();
+	for (;;) {
+		int wait = interval_ms_;
+		const FrameGrabber::Status status = grabber_.grab(kMaxWidth, kMaxHeight, frame);
 
-		const FrameGrabber::Status status = grabber_.grab(cfg.max_width, cfg.max_height, frame);
 		if (status != FrameGrabber::Status::Ok) {
-			set_health(status == FrameGrabber::Status::NotReady ||
-						   status == FrameGrabber::Status::RenderFailed
-					   ? VisionHealth::State::Empty
-					   : VisionHealth::State::NoSource);
-			/* None of these are our failure to report loudly every tick:
-			 * the streamer is between scenes, or has not picked a source
-			 * yet. The dock will say so; the log says it once per tick at
-			 * debug level and moves on. */
-			obs_log(LOG_DEBUG, "vision: no frame (status %d)", static_cast<int>(status));
-			if (!wait_for(interval_ms_))
+			/* Between scenes, or nothing picked yet: the dock says so. */
+			set_health(status == FrameGrabber::Status::NotReady ? VisionHealth::State::Empty
+									    : VisionHealth::State::NoSource);
+		} else if (encode_jpeg(frame, jpeg)) {
+			const HttpResult result = client_.post_file("/api/frame", "frame", "frame.jpg", "image/jpeg",
+								    jpeg, {}, kUploadTimeoutSeconds);
+
+			if (stopping())
 				break;
-			continue;
-		}
 
-		if (!encode_jpeg(frame, cfg.jpeg_quality, jpeg)) {
-			if (!wait_for(interval_ms_))
+			if (result.ok()) {
+				failures = 0;
+				set_health(VisionHealth::State::Sending);
+				if (++frames % kFramesBetweenTempoSync == 0)
+					sync_tempo();
+			} else if (result.status == 401 || result.status == 403) {
+				/* A rejected key stays rejected; retrying only fills the log. */
+				obs_log(LOG_WARNING, "vision: server rejected the access key, stopping");
+				set_health(VisionHealth::State::KeyRejected);
 				break;
-			continue;
-		}
-
-		const HttpResult result = client_.post_frame(jpeg);
-		if (stop_requested_)
-			break;
-
-		if (result.ok()) {
-			consecutive_failures = 0;
-			set_health(VisionHealth::State::Sending);
-			++frame_number;
-			obs_log(LOG_DEBUG, "vision: frame #%llu, %ux%u, %zu kB, %.0f ms",
-				static_cast<unsigned long long>(frame_number), frame.width, frame.height,
-				jpeg.size() / 1024, (os_gettime_ns() - tick_started) / 1000000.0);
-
-			if (++ticks_since_tempo_sync >= kTicksBetweenTempoSync) {
-				ticks_since_tempo_sync = 0;
-				sync_tempo();
+			} else if (result.status == 429) {
+				wait = std::max(interval_ms_, kRateLimitBackoffMs);
+				set_health(VisionHealth::State::RateLimited, wait);
+			} else {
+				/* Doubling, capped: 5 s, 10 s, 20 s, 40 s, 60 s... */
+				++failures;
+				wait = static_cast<int>(std::min<long long>(static_cast<long long>(interval_ms_)
+										    << std::min(failures - 1, 16),
+									    kMaxBackoffMs));
+				obs_log(LOG_WARNING, "vision: send failed (%ld), retry in %d ms", result.status, wait);
+				set_health(VisionHealth::State::Retrying, wait);
 			}
-
-			if (!wait_for(interval_ms_))
-				break;
-			continue;
 		}
 
-		if (result.status == 401 || result.status == 403) {
-			/* A rejected key will stay rejected. Retrying forever would
-			 * only fill the streamer's log with the same line. */
-			obs_log(LOG_WARNING, "vision: server rejected the access key, stopping");
-			set_health(VisionHealth::State::KeyRejected);
-			break;
-		}
-
-		++consecutive_failures;
-
-		int backoff = interval_ms_;
-		if (result.rate_limited()) {
-			backoff = std::max(interval_ms_, kRateLimitBackoffMs);
-			obs_log(LOG_WARNING, "vision: rate limited, waiting %d ms", backoff);
-			set_health(VisionHealth::State::RateLimited, backoff);
-		} else {
-			/* Doubling, capped: 5s, 10s, 20s, 40s, 60s, 60s... */
-			const int shift = std::min(consecutive_failures - 1, 16);
-			const long long scaled = static_cast<long long>(interval_ms_) << shift;
-			backoff = static_cast<int>(std::min<long long>(scaled, kMaxBackoffMs));
-			obs_log(LOG_WARNING, "vision: send failed (%ld), retry in %d ms", result.status, backoff);
-			set_health(VisionHealth::State::Retrying, backoff);
-		}
-
-		if (!wait_for(backoff))
+		if (!wait_ms(wait))
 			break;
 	}
 
-	/* The abort raised by stop() was for the frame in flight; the backend
+	/* The cancel raised by stop() was for the frame in flight; the server
 	 * still needs to hear that the session ended. */
 	client_.clear_cancel();
-	client_.post_session_stop();
-	obs_log(LOG_INFO, "vision: worker exit after %llu frames", static_cast<unsigned long long>(frame_number));
+	client_.post_json("/api/session/stop", "{}", kSessionStopTimeoutSeconds);
+	obs_log(LOG_INFO, "vision: stopped after %llu frames", static_cast<unsigned long long>(frames));
 }
 
 void VisionLoop::select_source(obs_source_t *source)
 {
 	grabber_.select(source);
-	config::set_source_uuid(source ? obs_source_get_uuid(source) : "");
+
+	Config cfg = config::get();
+	cfg.source_uuid = source ? obs_source_get_uuid(source) : "";
+	config::set(cfg);
 }
 
 void VisionLoop::restore_selection()
 {
 	const Config cfg = config::get();
-
 	if (!cfg.source_uuid.empty()) {
 		if (obs_source_t *source = obs_get_source_by_uuid(cfg.source_uuid.c_str())) {
 			grabber_.select(source);
 			obs_source_release(source);
 			return;
 		}
-		obs_log(LOG_INFO, "vision: saved source is gone, picking a new one");
 	}
 
 	if (obs_source_t *source = pick_default_source()) {
 		select_source(source);
 		obs_source_release(source);
-		return;
 	}
-
-	obs_log(LOG_INFO, "vision: no capture source in the current scene");
 }
 
 } // namespace sokaster

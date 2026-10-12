@@ -18,61 +18,45 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #pragma once
 
-#include <cstdint>
 #include <string>
 
 namespace sokaster {
 
-/* The public domain, and the only address that may appear in this repository:
- * used when the streamer pastes a key without ever having set a server. */
-constexpr const char *kDefaultBackendUrl = "https://sokaster.ru";
-
 /*
- * Plugin settings, stored next to the module in obs_module_config_path().
+ * Plugin settings, stored in obs_module_config_path().
  *
  * Deliberately not kept in the scene collection or the profile: the access key
- * belongs to the machine, not to a set of scenes a streamer may import, export
- * or share.
+ * belongs to the machine, not to a set of scenes a streamer may share.
  */
 struct Config {
+	/* Empty means the public service. Only ever set by hand, for development. */
 	std::string backend_url;
 	std::string access_key;
 
-	/* The source the co-host looks at, by UUID. Names are what streamers
-	 * rename; UUIDs are what survives it. */
+	/* The source the co-host looks at, by UUID: names are what streamers
+	 * rename, UUIDs are what survives it. */
 	std::string source_uuid;
 
-	uint32_t max_width = 1280;
-	uint32_t max_height = 720;
-	int jpeg_quality = 80;
-
-	/* The OBS track the co-host listens to, 0-based; -1 until one is picked.
-	 * Remembered because it is only free the first time we look: after the
-	 * streamer ticks a source, the track counts as taken. */
+	/* The OBS track the co-host listens to, 0-based; -1 until one is picked. */
 	int audio_track = -1;
 
-	/* Fallback tempo. The backend owns the real one and hands it back as
-	 * EffectiveVisionIntervalMs; this is what we use until it answers. */
-	int vision_interval_ms = 5000;
+	/* An unconfigured plugin does no periodic work and touches nothing. */
+	bool configured() const { return !access_key.empty(); }
 
-	/* Without a server and a key there is nothing to send frames to, and an
-	 * unconfigured plugin must do no periodic work at all. */
-	bool configured() const { return !backend_url.empty() && !access_key.empty(); }
+	/* The server, without a trailing slash. */
+	std::string base_url() const;
 };
 
 namespace config {
 
-/* Reads the config file. Missing or broken file is not an error: defaults. */
+/* Reads the config file. A missing or broken file is not an error: defaults. */
 void load();
 
-/* Thread-safe snapshot. Callers work on a copy, never on shared state. */
+/* Thread-safe snapshot. */
 Config get();
 
 /* Replaces the settings and writes them out. */
 void set(const Config &next);
-
-/* Persists only the picked source, which changes far more often than the rest. */
-void set_source_uuid(const std::string &uuid);
 
 } // namespace config
 
