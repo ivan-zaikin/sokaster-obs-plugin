@@ -55,9 +55,10 @@ struct OverlayPresence {
 	std::string source_uuid;
 };
 
-/* token may be empty when it is not known yet; then any overlay page counts
- * and none is stale. Frontend API inside, so UI thread only. */
-OverlayPresence find_overlay(const std::string &token);
+/* Only browser sources showing base_url's overlay pages count. token may be
+ * empty when it is not known yet; then any of them counts and none is stale.
+ * Frontend API inside, so UI thread only. */
+OverlayPresence find_overlay(const std::string &base_url, const std::string &token);
 
 /* The address of this account's overlay page: <base_url>/overlay/<token>. */
 std::string overlay_url(const std::string &base_url, const std::string &token);

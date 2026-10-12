@@ -18,6 +18,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "link-flow.hpp"
 
+#include "plugin-config.hpp"
+
 #include <obs.h>
 #include <plugin-support.h>
 #include <util/platform.h>
@@ -140,13 +142,13 @@ void LinkFlow::run(const std::string &base_url)
 			continue;
 
 		const std::string key = str(p, "accessKey");
-		if (status == "approved" && !key.empty()) {
+		if (status == "approved" && is_token(key)) {
 			obs_log(LOG_INFO, "link: signed in");
 			notify(LinkEvent::Kind::Done, {}, {}, key);
 			return;
 		}
 
-		/* "denied", "expired", or an approval without a key. */
+		/* "denied", "expired", or an approval without a usable key. */
 		obs_log(LOG_INFO, "link: sign-in ended: %s", status.c_str());
 		break;
 	}

@@ -22,6 +22,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <plugin-support.h>
 #include <util/platform.h>
 
+/* No static GetApi(): another plugin may have loaded an older onnxruntime.dll
+ * into OBS first, and Windows hands us that one. A null API is then a
+ * VadFailed in the dock instead of a crash. */
+#define ORT_API_MANUAL_INIT
 #include <onnxruntime_cxx_api.h>
 
 #include <cstring>
@@ -67,6 +71,14 @@ bool SileroVad::load(const std::string &model_path)
 		obs_log(LOG_ERROR, "vad: %s is missing from the plugin's data directory", kModelFile);
 		return false;
 	}
+
+	const OrtApi *api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
+	if (!api) {
+		obs_log(LOG_ERROR, "vad: the loaded onnxruntime is older than API %d, likely another plugin's copy",
+			ORT_API_VERSION);
+		return false;
+	}
+	Ort::InitApi(api);
 
 	try {
 		auto impl = std::make_unique<Impl>();

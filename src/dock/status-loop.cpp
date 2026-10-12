@@ -130,11 +130,13 @@ void StatusLoop::fetch_account()
 			state_.display_name = str(o, "name");
 	}
 
+	/* The token goes into a browser source's URL: nothing but a token does. */
 	const HttpResult token = client_.get("/api/overlay-token");
-	if (token.ok())
-		state_.overlay_token = str(parse(token.body).object(), "token");
+	const std::string overlay_token = token.ok() ? str(parse(token.body).object(), "token") : std::string();
+	if (is_token(overlay_token))
+		state_.overlay_token = overlay_token;
 
-	account_fetched_ = me.ok() && token.ok();
+	account_fetched_ = me.ok() && is_token(overlay_token);
 }
 
 void StatusLoop::poll()

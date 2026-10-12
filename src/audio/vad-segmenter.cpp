@@ -95,9 +95,12 @@ std::vector<uint8_t> encode_wav(const std::vector<float> &samples)
 	tag("data");
 	put(data_size, 4);
 
-	/* Hard clip: past unity is already distorted, wrapping would be noise. */
-	for (float sample : samples)
-		put(static_cast<uint16_t>(static_cast<int16_t>(std::clamp(sample, -1.0f, 1.0f) * 32767.0f)), 2);
+	/* Hard clip: past unity is already distorted, wrapping would be noise. A
+	 * NaN from a broken filter would survive clamp and convert undefined. */
+	for (float sample : samples) {
+		const float clipped = std::isfinite(sample) ? std::clamp(sample, -1.0f, 1.0f) : 0.0f;
+		put(static_cast<uint16_t>(static_cast<int16_t>(clipped * 32767.0f)), 2);
+	}
 
 	return out;
 }

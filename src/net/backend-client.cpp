@@ -83,6 +83,9 @@ HttpResult BackendClient::perform(const std::string &path, void *mime, const std
 
 	curl_easy_reset(curl);
 	curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+	/* Belt and braces next to the config check; redirects are not followed,
+	 * so the key never goes anywhere but base_url. */
+	curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https,http");
 	curl_easy_setopt(curl, CURLOPT_USERAGENT, user_agent.c_str());
 	curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);

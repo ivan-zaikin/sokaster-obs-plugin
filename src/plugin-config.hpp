@@ -47,6 +47,10 @@ struct Config {
 	std::string base_url() const;
 };
 
+/* Access keys and overlay tokens are base64url. Whatever else arrives from the
+ * network or the settings file is refused before it reaches a header or a URL. */
+bool is_token(const std::string &value);
+
 namespace config {
 
 /* Reads the config file. A missing or broken file is not an error: defaults. */

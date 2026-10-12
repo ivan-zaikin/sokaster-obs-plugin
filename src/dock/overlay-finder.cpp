@@ -44,9 +44,22 @@ struct Candidate {
 };
 
 struct Search {
+	/* base_url + kOverlayPath: only a page of our own server is ours. Other
+	 * services keep overlays under /overlay/ too, and "Update address" must
+	 * never rewrite one of theirs. */
+	std::string prefix;
 	const std::string *token = nullptr;
 	Candidate best;
 };
+
+/* The token is the whole next path segment, not just a prefix of it. */
+bool names_token(const char *rest, const std::string &token)
+{
+	if (strncmp(rest, token.c_str(), token.size()) != 0)
+		return false;
+	const char next = rest[token.size()];
+	return next == '\0' || next == '?' || next == '#' || next == '/';
+}
 
 void consider_source(obs_source_t *source, Search *search)
 {
@@ -62,10 +75,10 @@ void consider_source(obs_source_t *source, Search *search)
 	const bool shutdown = obs_data_get_bool(settings, "shutdown");
 	obs_data_release(settings);
 
-	if (!url || !strstr(url, kOverlayPath))
+	if (!url || strncmp(url, search->prefix.c_str(), search->prefix.size()) != 0)
 		return;
 
-	const bool matches = search->token->empty() || strstr(url, search->token->c_str()) != nullptr;
+	const bool matches = search->token->empty() || names_token(url + search->prefix.size(), *search->token);
 
 	/* A matching overlay beats a stale one: with both in the scene, the
 	 * co-host is still heard, and that is the state worth reporting. */
@@ -93,9 +106,10 @@ bool consider_item(obs_scene_t *, obs_sceneitem_t *item, void *param)
 	return true;
 }
 
-Candidate search_scene(obs_source_t *scene_source, const std::string &token)
+Candidate search_scene(obs_source_t *scene_source, const std::string &base_url, const std::string &token)
 {
 	Search search;
+	search.prefix = base_url + kOverlayPath;
 	search.token = &token;
 
 	if (obs_scene_t *scene = obs_scene_from_source(scene_source))
@@ -106,7 +120,7 @@ Candidate search_scene(obs_source_t *scene_source, const std::string &token)
 
 } // namespace
 
-OverlayPresence find_overlay(const std::string &token)
+OverlayPresence find_overlay(const std::string &base_url, const std::string &token)
 {
 	OverlayPresence result;
 
@@ -114,7 +128,7 @@ OverlayPresence find_overlay(const std::string &token)
 	 * A scene nested inside it as a source is not followed — it is rare for
 	 * an overlay, and the server still reports whether one is connected. */
 	if (obs_source_t *current = obs_frontend_get_current_scene()) {
-		const Candidate here = search_scene(current, token);
+		const Candidate here = search_scene(current, base_url, token);
 		obs_source_release(current);
 
 		if (here.found) {
@@ -132,7 +146,7 @@ OverlayPresence find_overlay(const std::string &token)
 
 	Candidate elsewhere;
 	for (size_t i = 0; i < scenes.sources.num; ++i) {
-		const Candidate found = search_scene(scenes.sources.array[i], token);
+		const Candidate found = search_scene(scenes.sources.array[i], base_url, token);
 		if (found.found && (!elsewhere.found || (found.matches_token && !elsewhere.matches_token)))
 			elsewhere = found;
 	}

@@ -22,12 +22,30 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <plugin-support.h>
 #include <util/platform.h>
 
+#include <QUrl>
+
 #include <mutex>
 
 namespace sokaster {
 namespace {
 
 constexpr const char *kDefaultBackendUrl = "https://sokaster.ru";
+
+/* HTTPS, or plain HTTP to this machine for development: the access key travels
+ * in a header, and never in the clear across a network. */
+bool is_usable_backend(const std::string &value)
+{
+	const QUrl url(QString::fromStdString(value), QUrl::StrictMode);
+	if (!url.isValid() || url.host().isEmpty() || !url.userInfo().isEmpty() || url.hasQuery() || url.hasFragment())
+		return false;
+
+	if (url.scheme() == QLatin1String("https"))
+		return true;
+	const QString host = url.host();
+	return url.scheme() == QLatin1String("http") &&
+	       (host == QLatin1String("localhost") || host == QLatin1String("127.0.0.1") ||
+		host == QLatin1String("::1"));
+}
 
 std::mutex g_mutex;
 Config g_config;
@@ -71,6 +89,17 @@ void save_locked()
 
 } // namespace
 
+bool is_token(const std::string &value)
+{
+	if (value.size() < 16 || value.size() > 256)
+		return false;
+	for (const char c : value)
+		if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' ||
+		      c == '_'))
+			return false;
+	return true;
+}
+
 std::string Config::base_url() const
 {
 	std::string base = backend_url.empty() ? kDefaultBackendUrl : backend_url;
@@ -93,6 +122,14 @@ void load()
 	Config loaded;
 	loaded.backend_url = obs_data_get_string(data, "backend_url");
 	loaded.access_key = obs_data_get_string(data, "access_key");
+	if (!loaded.backend_url.empty() && !is_usable_backend(loaded.backend_url)) {
+		obs_log(LOG_WARNING, "config: backend_url must be https (or http to localhost), using the default");
+		loaded.backend_url.clear();
+	}
+	if (!loaded.access_key.empty() && !is_token(loaded.access_key)) {
+		obs_log(LOG_WARNING, "config: stored access key is malformed, signing out");
+		loaded.access_key.clear();
+	}
 	loaded.source_uuid = obs_data_get_string(data, "source_uuid");
 
 	const long long track = obs_data_get_int(data, "audio_track");

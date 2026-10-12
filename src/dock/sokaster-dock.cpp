@@ -372,7 +372,7 @@ void SokasterDock::reevaluate()
 	local.hearing_anything = audio.hearing_anything();
 	local.audio = audio.health();
 
-	local.overlay = sokaster::find_overlay(server_.overlay_token);
+	local.overlay = sokaster::find_overlay(sokaster::config::get().base_url(), server_.overlay_token);
 
 	const Readiness r = sokaster::evaluate_readiness(local, server_, os_gettime_ns());
 
