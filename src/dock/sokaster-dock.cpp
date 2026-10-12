@@ -73,6 +73,20 @@ const char *level_colour(Readiness::Level level)
 	}
 }
 
+const char *overlay_fix_label(Readiness::OverlayFix fix)
+{
+	switch (fix) {
+	case Readiness::OverlayFix::Update:
+		return "Dock.Overlay.Update";
+	case Readiness::OverlayFix::Listen:
+		return "Dock.Overlay.Listen";
+	case Readiness::OverlayFix::Sound:
+		return "Dock.Overlay.Sound";
+	default:
+		return "Dock.Overlay.Add";
+	}
+}
+
 QLabel *wrapping_label(QWidget *parent, bool bold = false)
 {
 	auto *label = new QLabel(parent);
@@ -392,11 +406,12 @@ void SokasterDock::reevaluate()
 	overlayFix_ = r.overlay_fix;
 	overlayFound_ = local.overlay;
 	overlayButton_->setVisible(overlayFix_ != Readiness::OverlayFix::None);
-	overlayButton_->setText(
-		text(overlayFix_ == Readiness::OverlayFix::Update ? "Dock.Overlay.Update" : "Dock.Overlay.Add"));
+	overlayButton_->setText(text(overlay_fix_label(overlayFix_)));
 	/* An address needs the token; until the server names it, an overlay
-	 * would point nowhere. */
-	overlayButton_->setEnabled(!server_.overlay_token.empty());
+	 * would point nowhere. Sound fixes need no address. */
+	const bool sound_fix = overlayFix_ == Readiness::OverlayFix::Listen ||
+			       overlayFix_ == Readiness::OverlayFix::Sound;
+	overlayButton_->setEnabled(sound_fix || !server_.overlay_token.empty());
 
 	/* Ticks only while something on screen counts down or can change
 	 * without a signal. An idle dock does no periodic work. */
@@ -496,6 +511,8 @@ void SokasterDock::onOverlayFix()
 							      sokaster::AudioLoop::instance().track());
 	else if (overlayFix_ == Fix::Update)
 		done = sokaster::set_overlay_url(overlayFound_.source_uuid, url);
+	else if (overlayFix_ == Fix::Listen || overlayFix_ == Fix::Sound)
+		done = sokaster::fix_overlay_sound(overlayFound_.source_uuid);
 
 	if (!done) {
 		/* Said on the button itself; the reason is in the OBS log. */

@@ -75,6 +75,10 @@ struct Readiness {
 		Add,
 		/* The overlay points at an old token. */
 		Update,
+		/* The streamer does not hear the overlay. */
+		Listen,
+		/* The stream hears it twice, or not at all. */
+		Sound,
 	};
 
 	QString headline;

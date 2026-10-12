@@ -73,6 +73,21 @@ Row overlay_row(const LocalFacts &local, const ServerState &server, Fix &fix)
 	fix = Fix::None;
 
 	if (known && server.overlay_connected) {
+		/* First: a browser tab opened to hear the voice is the likeliest
+		 * duplicate, and it goes away once OBS plays the voice itself. */
+		switch (o.sound) {
+		case OverlayPresence::Sound::Unheard:
+			fix = Fix::Listen;
+			return {Level::Warn, text("Dock.Overlay.Unheard")};
+		case OverlayPresence::Sound::Doubled:
+			fix = Fix::Sound;
+			return {Level::Warn, text("Dock.Overlay.Doubled")};
+		case OverlayPresence::Sound::OffAir:
+			fix = Fix::Sound;
+			return {Level::Warn, text("Dock.Overlay.OffAir")};
+		case OverlayPresence::Sound::Ok:
+			break;
+		}
 		/* No button for a duplicate: which copy to remove is the streamer's call. */
 		if (server.overlay_count > 1)
 			return {Level::Warn, text("Dock.Overlay.Duplicate").arg(server.overlay_count)};
