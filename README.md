@@ -3,7 +3,14 @@
 An AI co-host inside OBS Studio. The plugin watches a source you pick, listens to the audio
 tracks you tick, and talks back through a browser overlay — no second application to launch.
 
-**Status: early development.** The skeleton is in place, features are being built. No releases yet.
+**Status: early access (0.1.x).** Works end to end on Windows; expect rough edges and frequent updates.
+
+## Installation
+
+1. Download `sokaster-<version>-windows-x64.zip` from [Releases](https://github.com/ivan-zaikin/sokaster-obs-plugin/releases).
+2. Close OBS and unzip the archive into `C:\ProgramData\obs-studio\plugins\`, so that you get
+   `C:\ProgramData\obs-studio\plugins\sokaster\bin\64bit\sokaster.dll`.
+3. Start OBS, open **Docks → sokaster** and sign in.
 
 ## What it does
 
