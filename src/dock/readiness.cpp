@@ -128,7 +128,7 @@ Row eyes_row(const LocalFacts &local, const ServerState &server)
 
 	/* Off air nothing is captured; the selection is all there is to check. */
 	if (!local.streaming)
-		return {Level::Ok, QString()};
+		return {Level::Ok, text("Dock.Eyes.Ready")};
 
 	switch (local.vision.state) {
 	case VisionHealth::State::NoSource:
@@ -150,7 +150,7 @@ Row eyes_row(const LocalFacts &local, const ServerState &server)
 	 * while: the same problem from the other end. */
 	if (server.link == ServerState::Link::Ok && server.run_state == "DesktopOffline")
 		return {Level::Block, text("Dock.Eyes.NotArriving")};
-	return {Level::Ok, QString()};
+	return {Level::Ok, text("Dock.Eyes.Ok")};
 }
 
 Row ears_row(const LocalFacts &local)
