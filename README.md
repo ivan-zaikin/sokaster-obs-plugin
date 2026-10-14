@@ -7,10 +7,14 @@ tracks you tick, and talks back through a browser overlay — no second applicat
 
 ## Installation
 
-1. Download `sokaster-<version>-windows-x64.zip` from [Releases](https://github.com/ivan-zaikin/sokaster-obs-plugin/releases).
-2. Close OBS and unzip the archive into `C:\ProgramData\obs-studio\plugins\`, so that you get
-   `C:\ProgramData\obs-studio\plugins\sokaster\bin\64bit\sokaster.dll`.
+1. Download `sokaster-<version>-windows-x64-installer.exe` from [Releases](https://github.com/ivan-zaikin/sokaster-obs-plugin/releases).
+2. Close OBS and run the installer. It checks the OBS version and puts the plugin where OBS looks for it.
 3. Start OBS, open **Docks → sokaster** and sign in.
+
+To uninstall, use **Settings → Apps** in Windows ("sokaster for OBS Studio").
+
+Prefer no installer? The same release has `sokaster-<version>-windows-x64.zip`: close OBS and unzip it
+into `C:\ProgramData\obs-studio\plugins\`, so that you get `C:\ProgramData\obs-studio\plugins\sokaster\`.
 
 ## What it does
 
@@ -65,12 +69,14 @@ src/vision/           # source picker, GPU readback, JPEG upload loop
 src/audio/            # audio track tap, Silero VAD, speech segment upload loop
 data/locale/          # en-US, ru-RU — every user-facing string
 data/silero_vad.onnx  # Silero VAD v5 model (MIT, see silero_vad.LICENSE)
+cmake/sokaster/       # ours: ONNX Runtime, install layout, Windows installer (Inno Setup)
 cmake/, build-aux/    # build helpers from the template
 buildspec.json        # module name, version, pinned dependencies
 ```
 
-Installs like any modern OBS plugin, into
-`%ProgramData%\obs-studio\plugins\sokaster\` (`bin\64bit\sokaster.dll` and `data\locale\`).
+Installs into `%ProgramData%\obs-studio\plugins\sokaster\`. The DLL sits there twice: next to
+`data\` for OBS 33+ and in `bin\64bit\` for OBS 32 and older — each version loads only one of them
+(see `cmake/sokaster/plugin-layout.cmake`).
 
 ## License
 

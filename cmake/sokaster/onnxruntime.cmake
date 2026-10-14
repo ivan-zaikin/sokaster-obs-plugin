@@ -71,8 +71,17 @@ function(target_add_onnxruntime target)
 
   if(OS_WINDOWS)
     # Next to the plugin's own DLL, both when installed and when run from the
-    # build directory.
+    # build directory — in both install layouts, see plugin-layout.cmake.
     install(FILES "${ONNXRUNTIME_RUNTIME_LIBRARY}" DESTINATION "${target}/bin/64bit")
+    install(FILES "${ONNXRUNTIME_RUNTIME_LIBRARY}" DESTINATION "${target}")
+
+    # MIT asks for the notice to travel with the binary.
+    install(FILES "${onnxruntime_SOURCE_DIR}/LICENSE" DESTINATION "${target}/data" RENAME onnxruntime.LICENSE)
+    install(
+      FILES "${onnxruntime_SOURCE_DIR}/ThirdPartyNotices.txt"
+      DESTINATION "${target}/data"
+      RENAME onnxruntime.ThirdPartyNotices.txt
+    )
 
     add_custom_command(
       TARGET ${target}

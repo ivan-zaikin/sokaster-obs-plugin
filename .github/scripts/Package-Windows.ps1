@@ -3,7 +3,8 @@ param(
     [ValidateSet('x64')]
     [string] $Target = 'x64',
     [ValidateSet('Debug', 'RelWithDebInfo', 'Release', 'MinSizeRel')]
-    [string] $Configuration = 'RelWithDebInfo'
+    [string] $Configuration = 'RelWithDebInfo',
+    [switch] $Package
 )
 
 $ErrorActionPreference = 'Stop'
@@ -53,6 +54,7 @@ function Package {
         ErrorAction = 'SilentlyContinue'
         Path = @(
             "${ProjectRoot}/release/${ProductName}-*-windows-*.zip"
+            "${ProjectRoot}/release/${ProductName}-*-windows-*.exe"
         )
     }
 
@@ -67,6 +69,26 @@ function Package {
     }
     Compress-Archive -Force @CompressArgs
     Log-Group
+
+    if ( $Package ) {
+        Log-Group "Building installer for ${ProductName}..."
+        $Iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+        if ( ! ( Test-Path $Iscc ) ) {
+            Invoke-External choco install innosetup --yes --no-progress
+        }
+
+        # VERSIONINFO takes digits only, so 0.2.0-beta1 becomes 0.2.0 there.
+        $NumericVersion = ($ProductVersion -split '-')[0]
+
+        Invoke-External $Iscc `
+            "/DPluginVersion=${ProductVersion}" `
+            "/DNumericVersion=${NumericVersion}" `
+            "/DSourceDir=${ProjectRoot}\release\${Configuration}\${ProductName}" `
+            "/DOutputDir=${ProjectRoot}\release" `
+            "/DOutputBaseName=${OutputName}-installer" `
+            "${ProjectRoot}\cmake\sokaster\installer.iss"
+        Log-Group
+    }
 }
 
 Package

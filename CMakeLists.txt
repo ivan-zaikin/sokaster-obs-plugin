@@ -15,6 +15,7 @@ include(helpers)
 # Ours, not the template's — kept in its own directory so the two never get
 # confused when the template is updated.
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/sokaster/onnxruntime.cmake")
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/sokaster/plugin-layout.cmake")
 
 add_library(${CMAKE_PROJECT_NAME} MODULE)
 
@@ -86,3 +87,5 @@ set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_nam
 # the plugin: neither OBS nor obs-deps carries it. After the plugin properties,
 # because on macOS this copies into the bundle the line above creates.
 target_add_onnxruntime(${CMAKE_PROJECT_NAME})
+
+target_install_both_layouts(${CMAKE_PROJECT_NAME})
