@@ -64,7 +64,8 @@ Row account_row(const LocalFacts &local, const ServerState &server)
 /*
  * The server says whether an overlay is connected; OBS says where it is and
  * what will cut it off. Connected wins: if the co-host can be heard, the rest
- * is advice.
+ * is advice — unless OBS has no overlay at all, since then the stream gets
+ * nothing of it.
  */
 Row overlay_row(const LocalFacts &local, const ServerState &server, Fix &fix)
 {
@@ -73,7 +74,13 @@ Row overlay_row(const LocalFacts &local, const ServerState &server, Fix &fix)
 	fix = Fix::None;
 
 	if (known && server.overlay_connected) {
-		/* First: a browser tab opened to hear the voice is the likeliest
+		/* Connected, yet not in OBS: a browser tab, or a source just removed
+		 * that the server has not seen go yet. */
+		if (o.where == OverlayPresence::Where::Missing) {
+			fix = Fix::Add;
+			return {Level::Warn, text("Dock.Overlay.Elsewhere")};
+		}
+		/* Then: a browser tab opened to hear the voice is the likeliest
 		 * duplicate, and it goes away once OBS plays the voice itself. */
 		switch (o.sound) {
 		case OverlayPresence::Sound::Unheard:
