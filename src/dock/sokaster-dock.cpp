@@ -87,6 +87,24 @@ const char *overlay_fix_label(Readiness::OverlayFix fix)
 	}
 }
 
+/* The workers read the key and open the session when they start: a restart
+ * picks up a new key, and opens a session the server has lost. */
+void restart_workers()
+{
+	sokaster::VisionLoop::instance().stop();
+	sokaster::AudioLoop::instance().stop();
+	sokaster::VisionLoop::instance().start();
+	sokaster::AudioLoop::instance().start();
+}
+
+/* The page needs a few seconds to load and connect: ask the server then
+ * rather than at the next routine poll. */
+void poke_status_soon(QObject *context)
+{
+	for (int ms : {3000, 8000})
+		QTimer::singleShot(ms, context, [] { sokaster::StatusLoop::instance().poke(); });
+}
+
 QLabel *wrapping_label(QWidget *parent, bool bold = false)
 {
 	auto *label = new QLabel(parent);
@@ -247,6 +265,12 @@ void SokasterDock::buildUi()
 
 	air_ = addRow(layout, "Dock.Air");
 
+	reconnectButton_ = new QPushButton(text("Dock.Reconnect"), content);
+	reconnectButton_->setToolTip(text("Dock.Reconnect.Hint"));
+	reconnectButton_->hide();
+	layout->addWidget(reconnectButton_);
+	connect(reconnectButton_, &QPushButton::clicked, this, &SokasterDock::onReconnect);
+
 	layout->addStretch(1);
 
 	auto *dashboard = new QPushButton(text("Dock.Cabinet"), content);
@@ -402,6 +426,7 @@ void SokasterDock::reevaluate()
 	linkBox_->setVisible(r.ask_to_sign_in && linking_);
 	linkStatus_->setVisible(r.ask_to_sign_in && !linking_ && !linkStatus_->text().isEmpty());
 	signOutButton_->setVisible(local.configured && !r.ask_to_sign_in);
+	reconnectButton_->setVisible(local.configured && !r.ask_to_sign_in);
 
 	overlayFix_ = r.overlay_fix;
 	overlayFound_ = local.overlay;
@@ -425,6 +450,12 @@ void SokasterDock::reevaluate()
 void SokasterDock::applyServerState(const sokaster::ServerState &state)
 {
 	server_ = state;
+
+	/* The server lost our session — restarted, most likely. The eyes open it
+	 * again; restarting the stream is not the streamer's job. */
+	if (state.link == sokaster::ServerState::Link::Ok && state.run_state == "SessionStopped" &&
+	    obs_frontend_streaming_active())
+		sokaster::VisionLoop::instance().reopen_session();
 
 	/* Also the moment to notice scene edits no signal reported, such as an
 	 * existing source added to a scene. */
@@ -476,12 +507,8 @@ void SokasterDock::applyLinkEvent(const sokaster::LinkEvent &event)
 	sokaster::StatusLoop::instance().reconfigure();
 
 	/* The workers read the key when they start: mid-stream, restart them. */
-	if (obs_frontend_streaming_active()) {
-		sokaster::VisionLoop::instance().stop();
-		sokaster::AudioLoop::instance().stop();
-		sokaster::VisionLoop::instance().start();
-		sokaster::AudioLoop::instance().start();
-	}
+	if (obs_frontend_streaming_active())
+		restart_workers();
 	refreshNow();
 }
 
@@ -520,9 +547,32 @@ void SokasterDock::onOverlayFix()
 		return;
 	}
 
-	/* The page needs a few seconds to load and connect: ask the server then
-	 * rather than at the next routine poll. */
-	for (int ms : {3000, 8000})
-		QTimer::singleShot(ms, this, [] { sokaster::StatusLoop::instance().poke(); });
+	poke_status_soon(this);
+	refreshNow();
+}
+
+/*
+ * Everything a stream restart would redo, short of the restart: a fresh
+ * session with fresh workers, a reloaded overlay page, a poll without backoff.
+ * For the case the automatic retries did not cover.
+ */
+void SokasterDock::onReconnect()
+{
+	obs_log(LOG_INFO, "dock: reconnect requested");
+
+	/* Off air the workers are not running; starting them would start the
+	 * co-host without a stream. */
+	if (obs_frontend_streaming_active())
+		restart_workers();
+
+	if (overlayFound_.where != sokaster::OverlayPresence::Where::Missing)
+		sokaster::reload_overlay(overlayFound_.source_uuid);
+
+	sokaster::StatusLoop::instance().reconfigure();
+	poke_status_soon(this);
+
+	/* One click is enough; a second one would only cut the first short. */
+	reconnectButton_->setEnabled(false);
+	QTimer::singleShot(5000, this, [this] { reconnectButton_->setEnabled(true); });
 	refreshNow();
 }

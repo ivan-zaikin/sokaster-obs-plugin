@@ -101,4 +101,8 @@ bool set_overlay_url(const std::string &source_uuid, const std::string &url);
  * to the stream. */
 bool fix_overlay_sound(const std::string &source_uuid);
 
+/* Reloads the given overlay page, as the browser source's own "Refresh cache
+ * of current page" button does: a page that lost its connection gets a new one. */
+bool reload_overlay(const std::string &source_uuid);
+
 } // namespace sokaster

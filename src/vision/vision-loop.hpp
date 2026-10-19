@@ -70,6 +70,10 @@ public:
 	 * OBS_FRONTEND_EVENT_EXIT, while the graphics thread is still alive. */
 	void shutdown();
 
+	/* The server no longer sees our session — it restarted, say. The worker
+	 * opens it again on its next tick. Any thread; no-op when idle. */
+	void reopen_session();
+
 	VisionHealth health() const;
 
 	/* The saved source, or a guess when there is none. UI thread, after
@@ -85,6 +89,8 @@ private:
 
 	void run();
 	void sync_tempo();
+	/* POST /api/session/start unless the session is already open; a 200 when it is. */
+	HttpResult open_session();
 	void set_health(VisionHealth::State state, int retry_ms = 0);
 
 	/* Interruptible sleep; false once a stop was requested. */
@@ -101,6 +107,8 @@ private:
 	mutable std::mutex mutex_;
 	std::condition_variable cv_;
 	bool stop_ = false;
+	/* Until POST /api/session/start succeeds the server drops our frames. */
+	bool session_open_ = false;
 	VisionHealth::State health_ = VisionHealth::State::Idle;
 	uint64_t retry_until_ns_ = 0;
 };

@@ -79,6 +79,7 @@ private:
 	void onSignIn();
 	void onSignOut();
 	void onOverlayFix();
+	void onReconnect();
 	void applyServerState(const sokaster::ServerState &state);
 	void applyLinkEvent(const sokaster::LinkEvent &event);
 
@@ -109,6 +110,8 @@ private:
 	QListWidget *sources_ = nullptr;
 
 	RowWidgets air_;
+	/* What restarting the stream used to be needed for, without the restart. */
+	QPushButton *reconnectButton_ = nullptr;
 
 	QTimer *refreshTimer_ = nullptr;
 	/* Counts the retry and the workers' health down; only while that moves. */

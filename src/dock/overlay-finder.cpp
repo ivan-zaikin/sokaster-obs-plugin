@@ -420,4 +420,27 @@ bool fix_overlay_sound(const std::string &source_uuid)
 	return true;
 }
 
+bool reload_overlay(const std::string &source_uuid)
+{
+	obs_source_t *source = source_uuid.empty() ? nullptr : obs_get_source_by_uuid(source_uuid.c_str());
+	if (!source)
+		return false;
+
+	/* The browser source has no API for this, only the button on its
+	 * properties; pressing it is what the streamer would do by hand. */
+	obs_properties_t *props = obs_source_properties(source);
+	obs_property_t *refresh = props ? obs_properties_get(props, "refreshnocache") : nullptr;
+	const bool found = refresh && obs_property_get_type(refresh) == OBS_PROPERTY_BUTTON;
+	if (found)
+		obs_property_button_clicked(refresh, source);
+	obs_properties_destroy(props);
+	obs_source_release(source);
+
+	if (!found)
+		obs_log(LOG_WARNING, "overlay: no refresh button, not reloaded");
+	else
+		obs_log(LOG_INFO, "overlay: reloaded");
+	return found;
+}
+
 } // namespace sokaster

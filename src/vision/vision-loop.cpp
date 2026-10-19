@@ -96,6 +96,7 @@ void VisionLoop::start()
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
 		stop_ = false;
+		session_open_ = false;
 	}
 
 	grabber_.set_active(true);
@@ -118,6 +119,32 @@ void VisionLoop::stop()
 
 	grabber_.set_active(false);
 	set_health(VisionHealth::State::Idle);
+}
+
+void VisionLoop::reopen_session()
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	session_open_ = false;
+}
+
+HttpResult VisionLoop::open_session()
+{
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (session_open_)
+			return {200, {}};
+	}
+
+	/* The server keeps sessions in memory: after a restart it has forgotten
+	 * ours, and without this the co-host stays silent until the stream is
+	 * restarted. */
+	HttpResult result = client_.post_json("/api/session/start");
+	if (result.ok()) {
+		obs_log(LOG_INFO, "vision: session open");
+		std::lock_guard<std::mutex> lock(mutex_);
+		session_open_ = true;
+	}
+	return result;
 }
 
 void VisionLoop::shutdown()
@@ -180,7 +207,6 @@ void VisionLoop::run()
 	os_set_thread_name("sokaster-vision");
 	obs_log(LOG_INFO, "vision: started");
 
-	client_.post_json("/api/session/start");
 	sync_tempo();
 
 	Frame frame;
@@ -190,19 +216,30 @@ void VisionLoop::run()
 
 	for (;;) {
 		int wait = interval_ms_;
-		const FrameGrabber::Status status = grabber_.grab(kMaxWidth, kMaxHeight, frame);
 
-		if (status != FrameGrabber::Status::Ok) {
-			/* Between scenes, or nothing picked yet: the dock says so. */
-			set_health(status == FrameGrabber::Status::NotReady ? VisionHealth::State::Empty
-									    : VisionHealth::State::NoSource);
-		} else if (encode_jpeg(frame, jpeg)) {
-			const HttpResult result = client_.post_file("/api/frame", "frame", "frame.jpg", "image/jpeg",
-								    jpeg, {}, kUploadTimeoutSeconds);
+		/* The session first and apart from the picture: viewers can order
+		 * while the game is still minimised. A failed start backs off like a
+		 * failed upload. */
+		HttpResult result = open_session();
+		bool sent = !result.ok();
 
-			if (stopping())
-				break;
+		if (result.ok()) {
+			const FrameGrabber::Status status = grabber_.grab(kMaxWidth, kMaxHeight, frame);
+			if (status != FrameGrabber::Status::Ok) {
+				/* Between scenes, or nothing picked yet: the dock says so. */
+				set_health(status == FrameGrabber::Status::NotReady ? VisionHealth::State::Empty
+										    : VisionHealth::State::NoSource);
+			} else if (encode_jpeg(frame, jpeg)) {
+				result = client_.post_file("/api/frame", "frame", "frame.jpg", "image/jpeg", jpeg, {},
+							   kUploadTimeoutSeconds);
+				sent = true;
+			}
+		}
 
+		if (stopping())
+			break;
+
+		if (sent) {
 			if (result.ok()) {
 				failures = 0;
 				set_health(VisionHealth::State::Sending);
