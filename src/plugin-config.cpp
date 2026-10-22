@@ -50,9 +50,9 @@ bool is_usable_backend(const std::string &value)
 std::mutex g_mutex;
 Config g_config;
 
-std::string config_file_path()
+std::string config_file_path(const char *file = "sokaster.json")
 {
-	char *path = obs_module_config_path("sokaster.json");
+	char *path = obs_module_config_path(file);
 	if (!path)
 		return {};
 
@@ -61,18 +61,25 @@ std::string config_file_path()
 	return result;
 }
 
-void save_locked()
+/* OBS creates neither the plugin's config directory nor its parents. */
+bool ensure_config_dir()
 {
-	/* OBS creates neither the plugin's config directory nor its parents. */
 	char *dir = obs_module_config_path(nullptr);
 	const bool dir_ok = dir && os_mkdirs(dir) != MKDIR_ERROR;
 	bfree(dir);
 
-	const std::string path = config_file_path();
-	if (!dir_ok || path.empty()) {
+	if (!dir_ok)
 		obs_log(LOG_WARNING, "config: cannot create config directory");
+	return dir_ok;
+}
+
+constexpr const char *kHotkeysFile = "hotkeys.json";
+
+void save_locked()
+{
+	const std::string path = config_file_path();
+	if (!ensure_config_dir() || path.empty())
 		return;
-	}
 
 	obs_data_t *data = obs_data_create();
 	obs_data_set_string(data, "backend_url", g_config.backend_url.c_str());
@@ -159,6 +166,36 @@ void set(const Config &next)
 	std::lock_guard<std::mutex> lock(g_mutex);
 	g_config = next;
 	save_locked();
+}
+
+obs_data_array_t *load_hotkey(const char *name)
+{
+	const std::string path = config_file_path(kHotkeysFile);
+	obs_data_t *data = path.empty() ? nullptr : obs_data_create_from_json_file_safe(path.c_str(), "bak");
+	if (!data)
+		return nullptr;
+
+	obs_data_array_t *bindings = obs_data_get_array(data, name);
+	obs_data_release(data);
+	return bindings;
+}
+
+void save_hotkey(const char *name, obs_data_array_t *bindings)
+{
+	const std::string path = config_file_path(kHotkeysFile);
+	if (!ensure_config_dir() || path.empty())
+		return;
+
+	/* Read, change one key, write back: other hotkeys keep their bindings. */
+	obs_data_t *data = obs_data_create_from_json_file_safe(path.c_str(), "bak");
+	if (!data)
+		data = obs_data_create();
+	obs_data_set_array(data, name, bindings);
+
+	if (!obs_data_save_json_safe(data, path.c_str(), "tmp", "bak"))
+		obs_log(LOG_WARNING, "config: hotkey save failed");
+
+	obs_data_release(data);
 }
 
 } // namespace config

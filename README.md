@@ -21,9 +21,10 @@ into `C:\ProgramData\obs-studio\plugins\`, so that you get `C:\ProgramData\obs-s
 - **Eyes** — while you stream, captures the source you picked every few seconds and sends the frame to the sokaster service
 - **Ears** — mixes the audio sources you tick onto a spare OBS track, cuts it into speech segments with Silero VAD, and sends those
 - **Status panel** — a dock inside the OBS window that says whether the co-host is ready and, if not, what to fix
+- **Panic button** — takes the order on air off it, from the dock or with a hotkey (Settings → Hotkeys → *sokaster: take the order off air*)
 
 Replies come back into a browser overlay — an ordinary Browser Source that the plugin can add
-to your scene for you. Orders, moderation, voice and everything else live in the browser dashboard.
+to your scene for you. Reviewing orders, moderation, voice and everything else live in the browser dashboard.
 
 The plugin is a client for the [sokaster.ru](https://sokaster.ru) service and needs an account.
 

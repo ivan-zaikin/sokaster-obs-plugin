@@ -37,8 +37,9 @@ class QVBoxLayout;
 
 /*
  * The sokaster panel inside the OBS window: whether the co-host is ready and,
- * if not, why and what fixes it; what it watches; what it hears. Everything
- * else — orders, moderation, voice, lore — lives in the browser dashboard.
+ * if not, why and what fixes it; what it watches; what it hears; a way to take
+ * an order off air mid-stream. Everything else — orders, moderation, voice,
+ * lore — lives in the browser dashboard.
  *
  * Handed to obs_frontend_add_dock_by_id, which takes ownership.
  */
@@ -80,6 +81,7 @@ private:
 	void onSignOut();
 	void onOverlayFix();
 	void onReconnect();
+	void onDropOrder();
 	void applyServerState(const sokaster::ServerState &state);
 	void applyLinkEvent(const sokaster::LinkEvent &event);
 
@@ -112,6 +114,12 @@ private:
 	RowWidgets air_;
 	/* What restarting the stream used to be needed for, without the restart. */
 	QPushButton *reconnectButton_ = nullptr;
+	/* The panic button, while an order is on air; the hotkey does the same. */
+	QPushButton *dropButton_ = nullptr;
+	/* What came of the last take-off, for a few seconds. */
+	QLabel *dropStatus_ = nullptr;
+	QTimer *dropStatusTimer_ = nullptr;
+	uint32_t shownDropSeq_ = 0;
 
 	QTimer *refreshTimer_ = nullptr;
 	/* Counts the retry and the workers' health down; only while that moves. */

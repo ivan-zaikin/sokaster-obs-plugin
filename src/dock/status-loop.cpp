@@ -41,6 +41,11 @@ constexpr int kOnAirPollMs = 5000;
 constexpr int kOffAirPollMs = 30000;
 constexpr int kMaxBackoffMs = 60000;
 
+/* Long enough for a double press, short enough to take off the next order on
+ * purpose. A panic button that hangs is worse than one that says it failed. */
+constexpr uint64_t kDropCooldownNs = 3000000000ull;
+constexpr long kDropTimeoutSeconds = 10;
+
 QJsonDocument parse(const std::string &body)
 {
 	return QJsonDocument::fromJson(QByteArray::fromStdString(body));
@@ -112,6 +117,47 @@ void StatusLoop::set_streaming(bool streaming)
 	poke();
 }
 
+void StatusLoop::drop_order()
+{
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		const uint64_t now = os_gettime_ns();
+		if (last_drop_request_ns_ && now - last_drop_request_ns_ < kDropCooldownNs) {
+			obs_log(LOG_INFO, "orders: take off air ignored, repeated within the cooldown");
+			return;
+		}
+		last_drop_request_ns_ = now;
+		drop_ = true;
+	}
+	cv_.notify_all();
+}
+
+void StatusLoop::reset_state()
+{
+	/* The last answer outlives a new key: a reset to zero could match the
+	 * number the dock has already shown and hide a fresh answer. */
+	const ServerState::Drop last_drop = state_.last_drop;
+	const uint32_t drop_seq = state_.drop_seq;
+	state_ = ServerState();
+	state_.last_drop = last_drop;
+	state_.drop_seq = drop_seq;
+}
+
+void StatusLoop::drop_now()
+{
+	const HttpResult r = client_.del("/api/persona/donation", kDropTimeoutSeconds);
+	++state_.drop_seq;
+	if (!r.ok()) {
+		state_.last_drop = ServerState::Drop::Failed;
+		obs_log(LOG_WARNING, "orders: take off air failed (%ld)", r.status);
+		return;
+	}
+
+	const bool dropped = parse(r.body).object().value(QLatin1String("dropped")).toBool();
+	state_.last_drop = dropped ? ServerState::Drop::Dropped : ServerState::Drop::NothingOnAir;
+	obs_log(LOG_INFO, "orders: take off air -> %s", dropped ? "dropped" : "nothing on air");
+}
+
 int StatusLoop::poll_interval_ms() const
 {
 	const int base = streaming_ ? kOnAirPollMs : kOffAirPollMs;
@@ -178,9 +224,14 @@ void StatusLoop::poll()
 	const HttpResult orders = client_.get("/api/orders");
 	if (orders.ok()) {
 		state_.pending_orders = 0;
-		for (const QJsonValue &order : parse(orders.body).array())
-			if (order.toObject().value(QLatin1String("state")).toString() == QLatin1String("pending"))
+		state_.order_on_air = false;
+		for (const QJsonValue &order : parse(orders.body).array()) {
+			const QString state = order.toObject().value(QLatin1String("state")).toString();
+			if (state == QLatin1String("pending"))
 				++state_.pending_orders;
+			else if (state == QLatin1String("onair"))
+				state_.order_on_air = true;
+		}
 	}
 }
 
@@ -196,19 +247,29 @@ void StatusLoop::run()
 			const Config cfg = config::get();
 			client_.configure(cfg.base_url(), cfg.access_key);
 			configured = cfg.configured();
-			state_ = ServerState();
+			reset_state();
 			account_fetched_ = false;
 			failures_ = 0;
 		} else {
 			configured = config::get().configured();
 		}
 		poke_ = false;
+		const bool drop = drop_;
+		drop_ = false;
 
 		lock.unlock();
-		if (configured)
+		if (configured) {
+			/* Before the poll, so the dock sees the order gone at once. */
+			if (drop)
+				drop_now();
 			poll();
-		else
-			state_ = ServerState();
+		} else {
+			reset_state();
+			if (drop) {
+				state_.last_drop = ServerState::Drop::Failed;
+				++state_.drop_seq;
+			}
+		}
 		lock.lock();
 
 		if (stop_)
@@ -221,10 +282,10 @@ void StatusLoop::run()
 
 		if (!configured || state_.link == ServerState::Link::KeyRejected) {
 			/* Nothing to ask with: idle until a new key or a stop. */
-			cv_.wait(lock, [this] { return stop_ || reconfigure_; });
+			cv_.wait(lock, [this] { return stop_ || reconfigure_ || drop_; });
 		} else {
 			cv_.wait_for(lock, std::chrono::milliseconds(poll_interval_ms()),
-				     [this] { return stop_ || reconfigure_ || poke_; });
+				     [this] { return stop_ || reconfigure_ || poke_ || drop_; });
 		}
 	}
 }

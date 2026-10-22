@@ -69,6 +69,20 @@ struct ServerState {
 	/* GET /api/orders: viewer orders waiting for the streamer's decision,
 	 * which happens in the dashboard. */
 	int pending_orders = 0;
+	/* An order is on air: what the panic button would take off. */
+	bool order_on_air = false;
+
+	/* The answer to the last take-off-air request. drop_seq counts the
+	 * answers, so the dock tells a new one from the one it has shown. */
+	enum class Drop {
+		None,
+		Dropped,
+		/* Nothing was on air by the time the request arrived. */
+		NothingOnAir,
+		Failed,
+	};
+	Drop last_drop = Drop::None;
+	uint32_t drop_seq = 0;
 };
 
 /*
@@ -96,12 +110,20 @@ public:
 
 	void set_streaming(bool streaming);
 
+	/* Takes the order on air off it, on the worker. Any thread: the hotkey
+	 * calls it from the hotkey thread. A repeat within a few seconds is
+	 * dropped — by then the next order may be on air, and a held key or a
+	 * double click must not take that one off too. */
+	void drop_order();
+
 private:
 	StatusLoop() = default;
 
 	void run();
 	void poll();
 	void fetch_account();
+	void drop_now();
+	void reset_state();
 	int poll_interval_ms() const;
 
 	BackendClient client_;
@@ -114,6 +136,8 @@ private:
 	bool stop_ = false;
 	bool reconfigure_ = false;
 	bool poke_ = false;
+	bool drop_ = false;
+	uint64_t last_drop_request_ns_ = 0;
 
 	/* Worker-owned. */
 	ServerState state_;

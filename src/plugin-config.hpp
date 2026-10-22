@@ -18,6 +18,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #pragma once
 
+#include <obs-data.h>
+
 #include <string>
 
 namespace sokaster {
@@ -61,6 +63,13 @@ Config get();
 
 /* Replaces the settings and writes them out. */
 void set(const Config &next);
+
+/* Hotkey bindings as obs_hotkey_save() gives them, in a file of their own next
+ * to the settings: OBS saves no frontend hotkey by itself, and the scene
+ * collection would lose a key on every collection switch. load_hotkey returns
+ * a reference for the caller to release, or null when nothing was saved. */
+obs_data_array_t *load_hotkey(const char *name);
+void save_hotkey(const char *name, obs_data_array_t *bindings);
 
 } // namespace config
 

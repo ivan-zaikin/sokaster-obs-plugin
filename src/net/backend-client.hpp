@@ -61,6 +61,7 @@ public:
 	HttpResult get(const std::string &path, long timeout_seconds = kDefaultTimeoutSeconds);
 	HttpResult post_json(const std::string &path, const std::string &json = "{}",
 			     long timeout_seconds = kDefaultTimeoutSeconds);
+	HttpResult del(const std::string &path, long timeout_seconds = kDefaultTimeoutSeconds);
 
 	/* multipart/form-data: one file part plus plain fields. */
 	HttpResult post_file(const std::string &path, const char *field, const char *filename, const char *mime_type,
@@ -75,8 +76,10 @@ public:
 	static bool global_init();
 
 private:
-	/* Body is a curl_mime* or the JSON text; at most one of them. */
-	HttpResult perform(const std::string &path, void *mime, const std::string *json, long timeout_seconds);
+	/* Body is a curl_mime* or the JSON text; at most one of them. A method
+	 * overrides the one curl picks from the body (GET or POST). */
+	HttpResult perform(const std::string &path, void *mime, const std::string *json, long timeout_seconds,
+			   const char *method = nullptr);
 
 	std::mutex mutex_;
 	/* A CURL easy handle, opaque so curl.h stays in one translation unit. */

@@ -71,7 +71,8 @@ void BackendClient::configure(const std::string &base_url, const std::string &ac
 	cancelled_ = false;
 }
 
-HttpResult BackendClient::perform(const std::string &path, void *mime, const std::string *json, long timeout_seconds)
+HttpResult BackendClient::perform(const std::string &path, void *mime, const std::string *json, long timeout_seconds,
+				  const char *method)
 {
 	HttpResult result;
 	if (!curl_ || base_url_.empty() || cancelled_)
@@ -109,6 +110,8 @@ HttpResult BackendClient::perform(const std::string &path, void *mime, const std
 		curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json->c_str());
 		curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(json->size()));
 	}
+	if (method)
+		curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method);
 	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
 	const CURLcode code = curl_easy_perform(curl);
@@ -131,6 +134,12 @@ HttpResult BackendClient::post_json(const std::string &path, const std::string &
 {
 	std::lock_guard<std::mutex> lock(mutex_);
 	return perform(path, nullptr, &json, timeout_seconds);
+}
+
+HttpResult BackendClient::del(const std::string &path, long timeout_seconds)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	return perform(path, nullptr, nullptr, timeout_seconds, "DELETE");
 }
 
 HttpResult BackendClient::post_file(const std::string &path, const char *field, const char *filename,

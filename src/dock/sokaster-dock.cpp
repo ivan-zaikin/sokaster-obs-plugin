@@ -265,6 +265,22 @@ void SokasterDock::buildUi()
 
 	air_ = addRow(layout, "Dock.Air");
 
+	/* No confirmation: the next order goes on air by itself, and a panic
+	 * button that asks first is not one. */
+	dropButton_ = new QPushButton(text("Dock.Air.Drop"), content);
+	dropButton_->setToolTip(text("Dock.Air.Drop.Hint"));
+	dropButton_->hide();
+	layout->addWidget(dropButton_);
+	connect(dropButton_, &QPushButton::clicked, this, &SokasterDock::onDropOrder);
+
+	dropStatus_ = wrapping_label(content);
+	dropStatus_->hide();
+	layout->addWidget(dropStatus_);
+	dropStatusTimer_ = new QTimer(this);
+	dropStatusTimer_->setSingleShot(true);
+	dropStatusTimer_->setInterval(6000);
+	connect(dropStatusTimer_, &QTimer::timeout, dropStatus_, &QLabel::hide);
+
 	reconnectButton_ = new QPushButton(text("Dock.Reconnect"), content);
 	reconnectButton_->setToolTip(text("Dock.Reconnect.Hint"));
 	reconnectButton_->hide();
@@ -427,6 +443,8 @@ void SokasterDock::reevaluate()
 	linkStatus_->setVisible(r.ask_to_sign_in && !linking_ && !linkStatus_->text().isEmpty());
 	signOutButton_->setVisible(local.configured && !r.ask_to_sign_in);
 	reconnectButton_->setVisible(local.configured && !r.ask_to_sign_in);
+	dropButton_->setVisible(local.configured && !r.ask_to_sign_in &&
+				server_.link == sokaster::ServerState::Link::Ok && server_.order_on_air);
 
 	overlayFix_ = r.overlay_fix;
 	overlayFound_ = local.overlay;
@@ -450,6 +468,20 @@ void SokasterDock::reevaluate()
 void SokasterDock::applyServerState(const sokaster::ServerState &state)
 {
 	server_ = state;
+
+	/* The hotkey answers here too: the dock is where the outcome shows. */
+	if (state.drop_seq != shownDropSeq_) {
+		shownDropSeq_ = state.drop_seq;
+		const char *key = state.last_drop == sokaster::ServerState::Drop::Dropped ? "Dock.Air.Dropped"
+				  : state.last_drop == sokaster::ServerState::Drop::NothingOnAir
+					  ? "Dock.Air.NothingOnAir"
+					  : "Dock.Air.DropFailed";
+		if (state.last_drop != sokaster::ServerState::Drop::None) {
+			dropStatus_->setText(text(key));
+			dropStatus_->show();
+			dropStatusTimer_->start();
+		}
+	}
 
 	/* The server lost our session — restarted, most likely. The eyes open it
 	 * again; restarting the stream is not the streamer's job. */
@@ -575,4 +607,13 @@ void SokasterDock::onReconnect()
 	reconnectButton_->setEnabled(false);
 	QTimer::singleShot(5000, this, [this] { reconnectButton_->setEnabled(true); });
 	refreshNow();
+}
+
+void SokasterDock::onDropOrder()
+{
+	sokaster::StatusLoop::instance().drop_order();
+
+	/* The loop ignores a repeat anyway; the button says so by waiting. */
+	dropButton_->setEnabled(false);
+	QTimer::singleShot(3000, this, [this] { dropButton_->setEnabled(true); });
 }
