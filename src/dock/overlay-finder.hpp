@@ -58,7 +58,8 @@ struct OverlayPresence {
 		 * and opens the overlay in a browser tab — a second copy. */
 		Unheard,
 		/* Monitored and sent out, while a desktop audio capture on an output
-		 * track picks up the monitoring device: viewers hear it twice. */
+		 * track picks up the monitoring device: viewers hear it twice.
+		 * Only before OBS 32, which takes the second copy out itself. */
 		Doubled,
 		/* Monitored only, and no such capture: only the streamer hears it. */
 		OffAir,
@@ -97,8 +98,8 @@ bool add_overlay_to_current_scene(const OverlayPresence &found, const std::strin
 bool set_overlay_url(const std::string &source_uuid, const std::string &url);
 
 /* Monitors the given overlay source so the streamer hears the voice, and sends
- * it out unless a desktop audio capture already carries the monitoring device
- * to the stream. */
+ * it out — before OBS 32, only if no desktop audio capture already carries the
+ * monitoring device to the stream; newer OBS deduplicates that on its own. */
 bool fix_overlay_sound(const std::string &source_uuid);
 
 /* Reloads the given overlay page, as the browser source's own "Refresh cache

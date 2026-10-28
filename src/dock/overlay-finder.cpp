@@ -29,6 +29,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #ifdef _WIN32
 #include <mmdeviceapi.h>
+#else
+#include <dlfcn.h>
 #endif
 
 namespace sokaster {
@@ -41,6 +43,51 @@ constexpr const char *kOverlayPath = "/overlay/";
  * rather than reflowed. */
 constexpr int kPageWidth = 1920;
 constexpr int kPageHeight = 1080;
+
+/* A libobs export that may be missing from the running OBS. The plugin is
+ * built against older headers, so newer calls are looked up, not linked. */
+void *libobs_export(const char *name)
+{
+#ifdef _WIN32
+	HMODULE libobs = GetModuleHandleW(L"obs.dll");
+	return libobs ? reinterpret_cast<void *>(GetProcAddress(libobs, name)) : nullptr;
+#else
+	return dlsym(RTLD_DEFAULT, name);
+#endif
+}
+
+/* OBS 33 made monitoring a plain on/off: a monitored source is always sent
+ * out too, "monitor only" is gone, and the old type calls warn in the log on
+ * every use. */
+using GetMonitoringEnabled = bool (*)(const obs_source_t *);
+using SetMonitoringEnabled = void (*)(obs_source_t *, bool);
+
+obs_monitoring_type monitoring_of(obs_source_t *source)
+{
+	static const auto get_enabled =
+		reinterpret_cast<GetMonitoringEnabled>(libobs_export("obs_source_get_monitoring_enabled"));
+	if (get_enabled)
+		return get_enabled(source) ? OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT : OBS_MONITORING_TYPE_NONE;
+	return obs_source_get_monitoring_type(source);
+}
+
+void set_monitoring(obs_source_t *source, obs_monitoring_type type)
+{
+	static const auto set_enabled =
+		reinterpret_cast<SetMonitoringEnabled>(libobs_export("obs_source_set_monitoring_enabled"));
+	if (set_enabled)
+		set_enabled(source, type != OBS_MONITORING_TYPE_NONE);
+	else
+		obs_source_set_monitoring_type(source, type);
+}
+
+/* Since OBS 32 libobs itself keeps monitored sources out of the outputs while
+ * a desktop audio capture of the monitoring device feeds them: monitoring and
+ * sending out no longer doubles the voice. */
+bool libobs_deduplicates_monitoring()
+{
+	return obs_get_version() >= MAKE_SEMANTIC_VERSION(32, 0, 0);
+}
 
 struct Candidate {
 	bool found = false;
@@ -96,7 +143,7 @@ void consider_source(obs_source_t *source, Search *search)
 		search->best.matches_token = matches;
 		search->best.shutdown_when_hidden = shutdown;
 		search->best.through_obs = through_obs;
-		search->best.monitoring = obs_source_get_monitoring_type(source);
+		search->best.monitoring = monitoring_of(source);
 		search->best.uuid = obs_source_get_uuid(source);
 	}
 }
@@ -202,8 +249,8 @@ bool catches_monitoring(void *param, obs_source_t *source)
 }
 
 /* A desktop audio capture puts whatever OBS monitors onto the stream or the
- * recording. libobs does not take the monitored copy out of it, so a source
- * both monitored and sent out would be heard twice. */
+ * recording. Before OBS 32 libobs did not take the monitored copy out of it,
+ * so a source both monitored and sent out was heard twice. */
 bool monitoring_reaches_outputs()
 {
 	CaptureScan scan;
@@ -215,6 +262,10 @@ bool monitoring_reaches_outputs()
 
 obs_monitoring_type wanted_monitoring()
 {
+	/* With libobs deduplicating, monitor and output is right whatever the
+	 * desktop audio does later — and on OBS 33 the only monitored kind. */
+	if (libobs_deduplicates_monitoring())
+		return OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT;
 	return monitoring_reaches_outputs() ? OBS_MONITORING_TYPE_MONITOR_ONLY : OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT;
 }
 
@@ -227,7 +278,7 @@ OverlayPresence::Sound judge_sound(const Candidate &c)
 		return Sound::Unheard;
 
 	const bool reaches = monitoring_reaches_outputs();
-	if (c.monitoring == OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT && reaches)
+	if (c.monitoring == OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT && reaches && !libobs_deduplicates_monitoring())
 		return Sound::Doubled;
 	if (c.monitoring == OBS_MONITORING_TYPE_MONITOR_ONLY && !reaches)
 		return Sound::OffAir;
@@ -339,7 +390,7 @@ obs_source_t *create_overlay_source(const std::string &url, const char *new_name
 	obs_source_t *source = obs_source_create("browser_source", name.c_str(), settings, nullptr);
 	obs_data_release(settings);
 	if (source)
-		obs_source_set_monitoring_type(source, wanted_monitoring());
+		set_monitoring(source, wanted_monitoring());
 	return source;
 }
 
@@ -412,7 +463,7 @@ bool fix_overlay_sound(const std::string &source_uuid)
 		return false;
 
 	const obs_monitoring_type type = wanted_monitoring();
-	obs_source_set_monitoring_type(source, type);
+	set_monitoring(source, type);
 	obs_source_release(source);
 
 	obs_log(LOG_INFO, "overlay: %s",
