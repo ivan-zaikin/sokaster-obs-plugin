@@ -58,6 +58,7 @@ struct ServerState {
 	std::string beta_status;
 	std::string requested_at;
 	bool admitted = false;
+	bool recording_allowed = false;
 	/* The server's RunState: "Ok", "NoOrder", "NoOverlay", ... */
 	std::string run_state;
 	double budget_usd = 0;

@@ -214,6 +214,7 @@ void StatusLoop::poll()
 	state_.beta_status = str(o, "status");
 	state_.requested_at = str(o, "requestedAt");
 	state_.admitted = o.value(QLatin1String("admitted")).toBool();
+	state_.recording_allowed = o.value(QLatin1String("recordingAllowed")).toBool();
 	state_.run_state = str(o, "runState");
 	state_.budget_usd = o.value(QLatin1String("budgetUsd")).toDouble();
 	state_.spent_usd = o.value(QLatin1String("spentUsd")).toDouble();

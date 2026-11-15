@@ -134,7 +134,7 @@ Row eyes_row(const LocalFacts &local, const ServerState &server)
 	}
 
 	/* Off air nothing is captured; the selection is all there is to check. */
-	if (!local.streaming)
+	if (!local.capture_active)
 		return {Level::Ok, text("Dock.Eyes.Ready")};
 
 	switch (local.vision.state) {
@@ -194,16 +194,16 @@ Row air_row(const LocalFacts &local, const ServerState &server)
 			text("Dock.Air.Budget").arg(server.spent_usd, 0, 'f', 2).arg(server.budget_usd, 0, 'f', 2)};
 	if (server.pending_orders > 0)
 		return {Level::Warn, text("Dock.Air.Pending").arg(server.pending_orders)};
-	if (!local.streaming)
-		return {Level::Neutral, text("Dock.Air.NotStreaming")};
+	if (!local.capture_active)
+		return {Level::Neutral, text(server.recording_allowed ? "Dock.Air.RecordingReady" : "Dock.Air.NotStreaming")};
 	if (state == "SessionStopped")
 		return {Level::Warn, text("Dock.Air.Reconnecting")};
 	if (state == "NoCredit")
 		return {Level::Neutral, text("Dock.Air.NoCredit")};
 	if (state == "NoOrder")
-		return {Level::Neutral, text("Dock.Air.NoOrder")};
+		return {Level::Neutral, text(local.recording ? "Dock.Air.RecordingNoOrder" : "Dock.Air.NoOrder")};
 	if (state == "Ok")
-		return {Level::Ok, text("Dock.Air.Talking")};
+		return {Level::Ok, text(local.recording ? "Dock.Air.RecordingTalking" : "Dock.Air.Talking")};
 
 	/* NotApproved, NoOverlay, DesktopOffline: said on their own rows. */
 	return {};
@@ -234,8 +234,8 @@ Readiness evaluate_readiness(const LocalFacts &local, const ServerState &server,
 		r.headline = text("Dock.Ready.Setup").arg(blocking);
 	} else if (r.air.level == Level::Block) {
 		r.headline = text("Dock.Ready.Stopped");
-	} else if (server.run_state == "Ok" && local.streaming) {
-		r.headline = text("Dock.Ready.OnAir");
+	} else if (server.run_state == "Ok" && local.capture_active) {
+		r.headline = text(local.recording ? "Dock.Ready.Recording" : "Dock.Ready.OnAir");
 	} else if (server.have_beta) {
 		r.headline = text("Dock.Ready.Idle");
 	}

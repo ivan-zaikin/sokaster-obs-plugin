@@ -57,6 +57,7 @@ public slots:
 	/* Re-reads sources and scenes. Coalesced: OBS loading a scene collection
 	 * fires one signal per source. Safe to queue from any thread. */
 	void refreshSources();
+	void outputChanged();
 
 private:
 	struct RowWidgets {
@@ -71,6 +72,7 @@ private:
 	static void onSourceSignal(void *data, calldata_t *cd);
 
 	void refreshNow();
+	void syncCapture(bool restart = false);
 	void refreshWatches();
 	void refreshHears();
 	void reevaluate();
@@ -126,6 +128,8 @@ private:
 	QTimer *tick_ = nullptr;
 
 	sokaster::ServerState server_;
+	enum class CaptureMode { None, Stream, Recording };
+	CaptureMode captureMode_ = CaptureMode::None;
 
 	/* Set while lists are filled, so their signals are not taken for clicks. */
 	bool populating_ = false;

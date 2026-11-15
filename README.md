@@ -18,7 +18,7 @@ into `C:\ProgramData\obs-studio\plugins\`, so that you get `C:\ProgramData\obs-s
 
 ## What it does
 
-- **Eyes** — while you stream, captures the source you picked every few seconds and sends the frame to the sokaster service
+- **Eyes** — during a stream or an authorized test recording, captures the source you picked every few seconds and sends the frame to the sokaster service
 - **Ears** — mixes the audio sources you tick onto a spare OBS track, cuts it into speech segments with Silero VAD, and sends those
 - **Status panel** — a dock inside the OBS window that says whether the co-host is ready and, if not, what to fix
 - **Panic button** — takes the order on air off it, from the dock or with a hotkey (Settings → Hotkeys → *sokaster: take the order off air*)
@@ -28,10 +28,16 @@ to your scene for you. Reviewing orders, moderation, voice and everything else l
 
 The plugin is a client for the [sokaster.ru](https://sokaster.ru) service and needs an account.
 
+## Test recordings
+
+If your account has been given access, click **Start Recording** in OBS and place your own
+character order in the dashboard. The overlay works during the recording, with the usual
+budget and order limits. Streaming takes priority when OBS runs both outputs.
+
 ## Privacy
 
-Nothing leaves your computer until you sign in, and nothing is captured unless OBS is streaming.
-Then the plugin sends to `https://sokaster.ru` (the only server it talks to, unless `backend_url` in the settings file says otherwise):
+After you sign in, OBS starts capture when you stream or when you start an authorized test recording.
+The plugin then sends to `https://sokaster.ru` (the only server it talks to, unless `backend_url` in the settings file says otherwise):
 
 - JPEG frames of the one source you picked in the dock (never the program output), at most 1280×720
 - WAV segments of speech heard on the plugin's own audio track — only from the sources you ticked;

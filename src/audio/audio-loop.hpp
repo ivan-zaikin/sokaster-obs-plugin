@@ -60,7 +60,7 @@ public:
 	static AudioLoop &instance();
 
 	/* UI thread. No-op when unconfigured or without a track. */
-	void start();
+	void start(bool recording);
 
 	/* UI thread. Joins both workers. Safe to call when not running. */
 	void stop();
@@ -83,7 +83,7 @@ private:
 	AudioLoop() = default;
 
 	void run_vad();
-	void run_sender();
+	void run_sender(bool recording);
 	void enqueue(AudioSegment &&segment);
 
 	/* From a worker: the co-host stops listening until the next start(). */

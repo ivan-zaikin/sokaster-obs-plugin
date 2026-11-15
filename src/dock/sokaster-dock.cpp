@@ -87,16 +87,6 @@ const char *overlay_fix_label(Readiness::OverlayFix fix)
 	}
 }
 
-/* The workers read the key and open the session when they start: a restart
- * picks up a new key, and opens a session the server has lost. */
-void restart_workers()
-{
-	sokaster::VisionLoop::instance().stop();
-	sokaster::AudioLoop::instance().stop();
-	sokaster::VisionLoop::instance().start();
-	sokaster::AudioLoop::instance().start();
-}
-
 /* The page needs a few seconds to load and connect: ask the server then
  * rather than at the next routine poll. */
 void poke_status_soon(QObject *context)
@@ -144,7 +134,6 @@ SokasterDock::SokasterDock(QWidget *parent) : QWidget(parent)
 	sokaster::LinkFlow::instance().set_sink([this](const sokaster::LinkEvent &event) {
 		QMetaObject::invokeMethod(this, [this, event] { applyLinkEvent(event); }, Qt::QueuedConnection);
 	});
-	sokaster::StatusLoop::instance().set_streaming(obs_frontend_streaming_active());
 	sokaster::StatusLoop::instance().start([this](const sokaster::ServerState &state) {
 		QMetaObject::invokeMethod(this, [this, state] { applyServerState(state); }, Qt::QueuedConnection);
 	});
@@ -309,8 +298,43 @@ void SokasterDock::refreshSources()
 	refreshTimer_->start();
 }
 
+void SokasterDock::outputChanged()
+{
+	sokaster::StatusLoop::instance().poke();
+	refreshNow();
+}
+
+void SokasterDock::syncCapture(bool restart)
+{
+	CaptureMode next = CaptureMode::None;
+	if (sokaster::config::get().configured()) {
+		if (obs_frontend_streaming_active())
+			next = CaptureMode::Stream;
+		else if (obs_frontend_recording_active() && server_.recording_allowed &&
+			 server_.link != sokaster::ServerState::Link::KeyRejected)
+			next = CaptureMode::Recording;
+	}
+
+	if (next == captureMode_ && (!restart || next == CaptureMode::None))
+		return;
+
+	auto &vision = sokaster::VisionLoop::instance();
+	auto &audio = sokaster::AudioLoop::instance();
+	audio.stop();
+	vision.stop();
+	captureMode_ = next;
+
+	if (next != CaptureMode::None) {
+		const bool recording = next == CaptureMode::Recording;
+		vision.start(recording);
+		audio.start(recording);
+	}
+	sokaster::StatusLoop::instance().set_streaming(next != CaptureMode::None);
+}
+
 void SokasterDock::refreshNow()
 {
+	syncCapture();
 	refreshWatches();
 	refreshHears();
 	reevaluate();
@@ -409,7 +433,8 @@ void SokasterDock::reevaluate()
 
 	sokaster::LocalFacts local;
 	local.configured = sokaster::config::get().configured();
-	local.streaming = obs_frontend_streaming_active();
+	local.capture_active = captureMode_ != CaptureMode::None;
+	local.recording = captureMode_ == CaptureMode::Recording;
 
 	/* Asking by UUID is what tells a deleted selection from a live one. */
 	const std::string selected = vision.selected_uuid();
@@ -458,7 +483,7 @@ void SokasterDock::reevaluate()
 
 	/* Ticks only while something on screen counts down or can change
 	 * without a signal. An idle dock does no periodic work. */
-	const bool tick = local.configured && (local.streaming || server_.link == sokaster::ServerState::Link::Offline);
+	const bool tick = local.configured && (local.capture_active || server_.link == sokaster::ServerState::Link::Offline);
 	if (tick && !tick_->isActive())
 		tick_->start();
 	else if (!tick && tick_->isActive())
@@ -483,10 +508,12 @@ void SokasterDock::applyServerState(const sokaster::ServerState &state)
 		}
 	}
 
-	/* The server lost our session — restarted, most likely. The eyes open it
-	 * again; restarting the stream is not the streamer's job. */
-	if (state.link == sokaster::ServerState::Link::Ok && state.run_state == "SessionStopped" &&
-	    obs_frontend_streaming_active())
+	const CaptureMode previous = captureMode_;
+	syncCapture();
+
+	/* A backend restart can forget the active session. Reopen it in the same mode. */
+	if (captureMode_ != CaptureMode::None && previous == captureMode_ &&
+	    state.link == sokaster::ServerState::Link::Ok && state.run_state == "SessionStopped")
 		sokaster::VisionLoop::instance().reopen_session();
 
 	/* Also the moment to notice scene edits no signal reported, such as an
@@ -538,9 +565,9 @@ void SokasterDock::applyLinkEvent(const sokaster::LinkEvent &event)
 	sokaster::AudioLoop::instance().resolve_track();
 	sokaster::StatusLoop::instance().reconfigure();
 
-	/* The workers read the key when they start: mid-stream, restart them. */
-	if (obs_frontend_streaming_active())
-		restart_workers();
+	/* A recording permission belongs to the old account until the next poll. */
+	server_.recording_allowed = false;
+	syncCapture(true);
 	refreshNow();
 }
 
@@ -551,8 +578,8 @@ void SokasterDock::onSignOut()
 	sokaster::config::set(cfg);
 	obs_log(LOG_INFO, "config: signed out");
 
-	sokaster::VisionLoop::instance().stop();
-	sokaster::AudioLoop::instance().stop();
+	server_.recording_allowed = false;
+	syncCapture();
 	sokaster::StatusLoop::instance().reconfigure();
 	linkStatus_->clear();
 	reevaluate();
@@ -592,10 +619,7 @@ void SokasterDock::onReconnect()
 {
 	obs_log(LOG_INFO, "dock: reconnect requested");
 
-	/* Off air the workers are not running; starting them would start the
-	 * co-host without a stream. */
-	if (obs_frontend_streaming_active())
-		restart_workers();
+	syncCapture(true);
 
 	if (overlayFound_.where != sokaster::OverlayPresence::Where::Missing)
 		sokaster::reload_overlay(overlayFound_.source_uuid);

@@ -125,14 +125,7 @@ static void shutdown_workers()
 	sokaster::VisionLoop::instance().shutdown();
 }
 
-/*
- * The co-host works while the stream works.
- *
- * The reference scenario allows zero actions at the start of a broadcast, so
- * there is no button of ours to press: OBS going live is the signal, and OBS
- * going off air is the one to stop. Recording alone does not count — a local
- * recording is not an audience, and frames cost money.
- */
+/* The dock selects the capture mode from the OBS outputs and the server's recording permission. */
 static void on_frontend_event(enum obs_frontend_event event, void *)
 {
 	switch (event) {
@@ -156,17 +149,11 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 		break;
 
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
-		sokaster::VisionLoop::instance().start();
-		sokaster::AudioLoop::instance().start();
-		sokaster::StatusLoop::instance().set_streaming(true);
-		refresh_dock();
-		break;
-
 	case OBS_FRONTEND_EVENT_STREAMING_STOPPED:
-		sokaster::VisionLoop::instance().stop();
-		sokaster::AudioLoop::instance().stop();
-		sokaster::StatusLoop::instance().set_streaming(false);
-		refresh_dock();
+	case OBS_FRONTEND_EVENT_RECORDING_STARTED:
+	case OBS_FRONTEND_EVENT_RECORDING_STOPPED:
+		if (dock_widget)
+			QMetaObject::invokeMethod(dock_widget, "outputChanged", Qt::QueuedConnection);
 		break;
 
 	case OBS_FRONTEND_EVENT_EXIT:

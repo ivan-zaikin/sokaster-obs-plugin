@@ -30,7 +30,8 @@ namespace sokaster {
 /* Everything OBS itself can tell the panel, gathered on the UI thread. */
 struct LocalFacts {
 	bool configured = false;
-	bool streaming = false;
+	bool capture_active = false;
+	bool recording = false;
 
 	bool eyes_selected = false;
 	QString eyes_name;

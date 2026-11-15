@@ -18,6 +18,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "audio-loop.hpp"
 
+#include "vision/vision-loop.hpp"
+
 #include "silero-vad.hpp"
 #include "plugin-config.hpp"
 
@@ -118,7 +120,7 @@ void AudioLoop::set_health(AudioHealth::State state, int retry_seconds)
 					    : 0;
 }
 
-void AudioLoop::start()
+void AudioLoop::start(bool recording)
 {
 	if (vad_worker_.joinable())
 		return;
@@ -142,7 +144,7 @@ void AudioLoop::start()
 
 	tap_.start(static_cast<size_t>(track_));
 	vad_worker_ = std::thread([this] { run_vad(); });
-	send_worker_ = std::thread([this] { run_sender(); });
+	send_worker_ = std::thread([this, recording] { run_sender(recording); });
 }
 
 void AudioLoop::stop()
@@ -218,7 +220,7 @@ void AudioLoop::run_vad()
 	}
 }
 
-void AudioLoop::run_sender()
+void AudioLoop::run_sender(bool recording)
 {
 	os_set_thread_name("sokaster-audio-send");
 
@@ -238,6 +240,10 @@ void AudioLoop::run_sender()
 		/* Speech is perishable: what arrives during a pause is dropped, not
 		 * kept for later. */
 		if (os_gettime_ns() < paused_until_ns)
+			continue;
+
+		/* A recording may send audio only after the server has accepted its session. */
+		if (recording && !VisionLoop::instance().has_session())
 			continue;
 
 		const HttpResult result = client_.post_file("/api/audio", "audio", "segment.wav", "audio/wav",

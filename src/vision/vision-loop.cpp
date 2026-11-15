@@ -82,7 +82,7 @@ VisionLoop &VisionLoop::instance()
 	return loop;
 }
 
-void VisionLoop::start()
+void VisionLoop::start(bool recording)
 {
 	if (worker_.joinable())
 		return;
@@ -100,7 +100,7 @@ void VisionLoop::start()
 	}
 
 	grabber_.set_active(true);
-	worker_ = std::thread([this] { run(); });
+	worker_ = std::thread([this, recording] { run(recording); });
 }
 
 void VisionLoop::stop()
@@ -127,7 +127,13 @@ void VisionLoop::reopen_session()
 	session_open_ = false;
 }
 
-HttpResult VisionLoop::open_session()
+bool VisionLoop::has_session() const
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	return session_open_ && !stop_;
+}
+
+HttpResult VisionLoop::open_session(bool recording)
 {
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
@@ -138,7 +144,7 @@ HttpResult VisionLoop::open_session()
 	/* The server keeps sessions in memory: after a restart it has forgotten
 	 * ours, and without this the co-host stays silent until the stream is
 	 * restarted. */
-	HttpResult result = client_.post_json("/api/session/start");
+	HttpResult result = client_.post_json(recording ? "/api/session/start-recording" : "/api/session/start");
 	if (result.ok()) {
 		obs_log(LOG_INFO, "vision: session open");
 		std::lock_guard<std::mutex> lock(mutex_);
@@ -202,7 +208,7 @@ void VisionLoop::sync_tempo()
 	}
 }
 
-void VisionLoop::run()
+void VisionLoop::run(bool recording)
 {
 	os_set_thread_name("sokaster-vision");
 	obs_log(LOG_INFO, "vision: started");
@@ -220,7 +226,7 @@ void VisionLoop::run()
 		/* The session first and apart from the picture: viewers can order
 		 * while the game is still minimised. A failed start backs off like a
 		 * failed upload. */
-		HttpResult result = open_session();
+		HttpResult result = open_session(recording);
 		bool sent = !result.ok();
 
 		if (result.ok()) {
@@ -271,7 +277,8 @@ void VisionLoop::run()
 	/* The cancel raised by stop() was for the frame in flight; the server
 	 * still needs to hear that the session ended. */
 	client_.clear_cancel();
-	client_.post_json("/api/session/stop", "{}", kSessionStopTimeoutSeconds);
+	client_.post_json(recording ? "/api/session/stop-recording" : "/api/session/stop", "{}",
+			  kSessionStopTimeoutSeconds);
 	obs_log(LOG_INFO, "vision: stopped after %llu frames", static_cast<unsigned long long>(frames));
 }
 

@@ -61,7 +61,7 @@ public:
 	static VisionLoop &instance();
 
 	/* UI thread. No-op when unconfigured. */
-	void start();
+	void start(bool recording);
 
 	/* UI thread. Joins the worker. Safe to call when not running. */
 	void stop();
@@ -73,6 +73,7 @@ public:
 	/* The server no longer sees our session — it restarted, say. The worker
 	 * opens it again on its next tick. Any thread; no-op when idle. */
 	void reopen_session();
+	bool has_session() const;
 
 	VisionHealth health() const;
 
@@ -87,10 +88,10 @@ public:
 private:
 	VisionLoop() = default;
 
-	void run();
+	void run(bool recording);
 	void sync_tempo();
 	/* POST /api/session/start unless the session is already open; a 200 when it is. */
-	HttpResult open_session();
+	HttpResult open_session(bool recording);
 	void set_health(VisionHealth::State state, int retry_ms = 0);
 
 	/* Interruptible sleep; false once a stop was requested. */
